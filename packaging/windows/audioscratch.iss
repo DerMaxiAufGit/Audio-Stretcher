@@ -6,7 +6,7 @@
 ;  Inno Setup (ISCC.exe) is NOT installed in this environment, so this script
 ;  has never been compiled or run. The PRIMARY, verified Windows deliverable is
 ;  the self-contained .zip produced by packaging\windows\deploy.ps1
-;  (dist\AudioScratch-v0.1.0-win64.zip). This installer is an optional
+;  (dist\AudioScratch-v0.2.0-win64.zip). This installer is an optional
 ;  convenience wrapper around that same staged folder.
 ;
 ;  To build the installer:
@@ -15,11 +15,11 @@
 ;        DLLs + plugins + licenses\NOTICES.txt)
 ;    2. Install Inno Setup 6 (https://jrsoftware.org/isdl.php).
 ;    3. Compile:   ISCC packaging\windows\audioscratch.iss
-;    => Output\AudioScratch-v0.1.0-win64-setup.exe
+;    => Output\AudioScratch-v0.2.0-win64-setup.exe
 ; ============================================================================
 
 #define MyAppName    "AudioScratch"
-#define MyAppVersion "0.1.0"
+#define MyAppVersion "0.2.0"
 #define MyAppExeName "audioscratch.exe"
 #define MyStageDir   "..\..\build-win\stage\AudioScratch"
 
