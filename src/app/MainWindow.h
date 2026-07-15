@@ -6,6 +6,8 @@
 
 #include <QMainWindow>
 
+class QScrollBar;
+
 namespace as {
 
 class Deck;
@@ -15,6 +17,7 @@ class TransportBar;
 class PitchSpeedControls;
 class LoopMarkerBar;
 class InstantReplayControls;
+class TimeRulerBar;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -28,6 +31,8 @@ private slots:
     void openFile();
 
 private:
+    void syncScrollBar();
+
     Deck* deck_ = nullptr;
     VideoView* video_ = nullptr;
     WaveformView* waveform_ = nullptr;
@@ -35,6 +40,8 @@ private:
     PitchSpeedControls* pitchSpeed_ = nullptr;
     LoopMarkerBar* loopBar_ = nullptr;
     InstantReplayControls* instantReplay_ = nullptr;
+    TimeRulerBar* ruler_ = nullptr;
+    QScrollBar*   hScroll_ = nullptr;
 };
 
 } // namespace as

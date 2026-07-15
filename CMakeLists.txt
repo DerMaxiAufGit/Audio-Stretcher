@@ -139,6 +139,7 @@ set(APP_SOURCES
   src/ui/TransportBar.cpp
   src/ui/PitchSpeedControls.cpp
   src/ui/LoopMarkerBar.cpp
+  src/ui/TimeRulerBar.cpp
   src/ui/InstantReplayControls.cpp
   src/ui/SettingsDialog.cpp
   src/selftest/SelfTest.cpp

@@ -20,6 +20,14 @@ public:
     void setDeck(Deck* deck) { deck_ = deck; }
     void onMediaLoaded();      // reset zoom/scroll to fit the new clip
 
+    double samplesPerPixel()   const { return samplesPerPixel_; }
+    double scrollOffsetFrames() const { return scrollOffsetFrames_; }
+
+    void setScrollOffsetFrames(double frames);   // pan (clamped) — driven by the scrollbar
+    void zoomIn();                                // zoom in,  centred on the view
+    void zoomOut();                               // zoom out, centred on the view
+    void zoomToFit();                             // reset to whole-clip fit
+
     // Horizontal time mapping, shared with LoopMarkerBar so its handles/flags line
     // up with the waveform (both widgets are full-width with x=0 aligned).
     double frameAtX(double x) const;
@@ -34,11 +42,16 @@ protected:
     void mousePressEvent(QMouseEvent*) override;
     void mouseMoveEvent(QMouseEvent*) override;
     void mouseReleaseEvent(QMouseEvent*) override;
+    void resizeEvent(QResizeEvent*) override;
 
 private:
     void   scrubToX(double x);
     void   fitAll();
     void   followPlayhead();
+    void   zoomBy(double factor, double centerX);   // multiply zoom, keep the frame under centerX fixed
+    void   clampScroll();
+    double visibleFrames() const;
+    double maxScrollFrames() const;
 
     Deck*  deck_ = nullptr;
     double samplesPerPixel_ = 512.0;

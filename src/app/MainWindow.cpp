@@ -1,11 +1,18 @@
 #include "app/MainWindow.h"
 
+#include <algorithm>
+#include <cmath>
+
 #include <QAction>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QHBoxLayout>
 #include <QMenuBar>
+#include <QPushButton>
+#include <QScrollBar>
 #include <QSettings>
 #include <QShortcut>
+#include <QSignalBlocker>
 #include <QStatusBar>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -15,6 +22,7 @@
 #include "ui/LoopMarkerBar.h"
 #include "ui/PitchSpeedControls.h"
 #include "ui/SettingsDialog.h"
+#include "ui/TimeRulerBar.h"
 #include "ui/TransportBar.h"
 #include "ui/VideoView.h"
 #include "ui/WaveformView.h"
@@ -40,16 +48,60 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     loopBar_->setWaveform(waveform_);
 
     auto* central = new QWidget(this);
+
+    ruler_ = new TimeRulerBar(central);
+    ruler_->setDeck(deck_);
+    ruler_->setWaveform(waveform_);
+
+    // Timeline navigation: zoom buttons + horizontal scrollbar (issue #2).
+    auto* navRow    = new QWidget(central);
+    auto* navLayout = new QHBoxLayout(navRow);
+    navLayout->setContentsMargins(8, 4, 8, 4);
+    navLayout->setSpacing(6);
+    auto* zoomOutBtn = new QPushButton("-", navRow);
+    auto* zoomFitBtn = new QPushButton("Fit", navRow);
+    auto* zoomInBtn  = new QPushButton("+", navRow);
+    zoomOutBtn->setFixedWidth(32); zoomOutBtn->setToolTip("Zoom out  (-)");
+    zoomInBtn->setFixedWidth(32);  zoomInBtn->setToolTip("Zoom in  (+)");
+    zoomFitBtn->setToolTip("Fit the whole clip  (0)");
+    hScroll_ = new QScrollBar(Qt::Horizontal, navRow);
+    hScroll_->setToolTip("Scroll the timeline");
+    navLayout->addWidget(zoomOutBtn);
+    navLayout->addWidget(zoomFitBtn);
+    navLayout->addWidget(zoomInBtn);
+    navLayout->addWidget(hScroll_, 1);
+
     auto* layout = new QVBoxLayout(central);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
     layout->addWidget(video_, 3);
+    layout->addWidget(ruler_, 0);        // NEW — time ruler above the waveform
     layout->addWidget(waveform_, 1);
     layout->addWidget(loopBar_, 0);      // aligned directly under the waveform
+    layout->addWidget(navRow, 0);        // NEW — zoom buttons + scrollbar
     layout->addWidget(pitchSpeed_, 0);
     layout->addWidget(instantReplay_, 0);
     layout->addWidget(transport_, 0);
     setCentralWidget(central);
+
+    connect(zoomInBtn,  &QPushButton::clicked, waveform_, &WaveformView::zoomIn);
+    connect(zoomOutBtn, &QPushButton::clicked, waveform_, &WaveformView::zoomOut);
+    connect(zoomFitBtn, &QPushButton::clicked, waveform_, &WaveformView::zoomToFit);
+    connect(waveform_,  &WaveformView::viewChanged, this, &MainWindow::syncScrollBar);
+    connect(hScroll_,   &QScrollBar::valueChanged, this, [this](int v) {
+        if (!waveform_) return;
+        waveform_->setScrollOffsetFrames(v * waveform_->samplesPerPixel());
+    });
+    connect(new QShortcut(QKeySequence(Qt::Key_Plus),  this), &QShortcut::activated,
+            waveform_, &WaveformView::zoomIn);
+    connect(new QShortcut(QKeySequence(Qt::Key_Equal), this), &QShortcut::activated,
+            waveform_, &WaveformView::zoomIn);
+    connect(new QShortcut(QKeySequence(Qt::Key_Minus), this), &QShortcut::activated,
+            waveform_, &WaveformView::zoomOut);
+    connect(new QShortcut(QKeySequence(Qt::Key_0),     this), &QShortcut::activated,
+            waveform_, &WaveformView::zoomToFit);
+
+    syncScrollBar();   // initialise the scrollbar (disabled until a clip loads)
 
     // --- Wire performance controls to the deck (model + engine control block) ---
     connect(pitchSpeed_, &PitchSpeedControls::pitchRatioChanged,
@@ -146,6 +198,28 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 }
 
 MainWindow::~MainWindow() = default;
+
+void MainWindow::syncScrollBar() {
+    if (!waveform_ || !hScroll_ || !deck_) return;
+    const double spp = waveform_->samplesPerPixel();
+    const long long total = static_cast<long long>(deck_->durationFrames());
+    const int page = std::max(1, waveform_->width());
+    if (total <= 0 || spp <= 0.0) {
+        QSignalBlocker b(hScroll_);
+        hScroll_->setRange(0, 0);
+        hScroll_->setEnabled(false);
+        return;
+    }
+    const long long contentPx = std::llround(total / spp);
+    const int maxv = static_cast<int>(std::max(0LL, contentPx - page));
+    const int val  = static_cast<int>(std::llround(waveform_->scrollOffsetFrames() / spp));
+    QSignalBlocker b(hScroll_);
+    hScroll_->setPageStep(page);
+    hScroll_->setSingleStep(std::max(1, page / 10));
+    hScroll_->setRange(0, maxv);
+    hScroll_->setValue(std::clamp(val, 0, maxv));
+    hScroll_->setEnabled(maxv > 0);
+}
 
 void MainWindow::openFile() {
     const QString path = QFileDialog::getOpenFileName(

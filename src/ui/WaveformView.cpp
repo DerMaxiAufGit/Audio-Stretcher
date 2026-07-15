@@ -5,6 +5,7 @@
 
 #include <QMouseEvent>
 #include <QPainter>
+#include <QResizeEvent>
 #include <QTimer>
 #include <QWheelEvent>
 
@@ -37,6 +38,20 @@ double WaveformView::xAtFrame(double frame) const {
     return (frame - scrollOffsetFrames_) / samplesPerPixel_;
 }
 
+double WaveformView::visibleFrames() const {
+    return std::max(1, width()) * samplesPerPixel_;
+}
+
+double WaveformView::maxScrollFrames() const {
+    const DecodedAudio* a = deck_ ? deck_->audio() : nullptr;
+    if (!a || a->empty()) return 0.0;
+    return std::max(0.0, static_cast<double>(a->frameCount()) - visibleFrames());
+}
+
+void WaveformView::clampScroll() {
+    scrollOffsetFrames_ = std::clamp(scrollOffsetFrames_, 0.0, maxScrollFrames());
+}
+
 void WaveformView::fitAll() {
     const DecodedAudio* a = deck_ ? deck_->audio() : nullptr;
     if (!a || a->empty() || width() <= 0) return;
@@ -51,6 +66,7 @@ void WaveformView::followPlayhead() {
     const double x = xAtFrame(pf);
     if (x < 0 || x > width()) {             // recentre when off-screen
         scrollOffsetFrames_ = pf - width() * samplesPerPixel_ * 0.5;
+        clampScroll();
         emit viewChanged();
     }
 }
@@ -126,21 +142,51 @@ void WaveformView::paintEvent(QPaintEvent*) {
 void WaveformView::wheelEvent(QWheelEvent* e) {
     const DecodedAudio* a = deck_ ? deck_->audio() : nullptr;
     if (!a || a->empty()) return;
-    const double mx = e->position().x();
-
     if (e->modifiers() & Qt::ShiftModifier) {
         scrollOffsetFrames_ -= (e->angleDelta().y() / 120.0) * samplesPerPixel_ * 80.0;
+        clampScroll();
+        emit viewChanged();
+        update();
     } else {
-        const double fCursor = frameAtX(mx);
         const double factor = std::pow(1.2, e->angleDelta().y() / 120.0);
-        const double maxSpp = std::max(1.0, static_cast<double>(a->frameCount()) / std::max(1, width()));
-        samplesPerPixel_ = std::clamp(samplesPerPixel_ / factor, 1.0, maxSpp * 4.0);
-        scrollOffsetFrames_ = fCursor - mx * samplesPerPixel_;
+        zoomBy(factor, e->position().x());
     }
-    scrollOffsetFrames_ = std::clamp(scrollOffsetFrames_, 0.0,
-                                     std::max(0.0, static_cast<double>(a->frameCount())));
+}
+
+void WaveformView::zoomBy(double factor, double centerX) {
+    const DecodedAudio* a = deck_ ? deck_->audio() : nullptr;
+    if (!a || a->empty()) return;
+    const double fCenter = frameAtX(centerX);
+    const double maxSpp = std::max(1.0, static_cast<double>(a->frameCount()) / std::max(1, width()));
+    samplesPerPixel_ = std::clamp(samplesPerPixel_ / factor, 1.0, maxSpp);
+    scrollOffsetFrames_ = fCenter - centerX * samplesPerPixel_;
+    clampScroll();
     emit viewChanged();
     update();
+}
+
+void WaveformView::zoomIn()    { zoomBy(1.3, width() / 2.0); }
+void WaveformView::zoomOut()   { zoomBy(1.0 / 1.3, width() / 2.0); }
+void WaveformView::zoomToFit() { fitAll(); emit viewChanged(); update(); }
+
+void WaveformView::setScrollOffsetFrames(double frames) {
+    scrollOffsetFrames_ = frames;
+    clampScroll();
+    emit viewChanged();
+    update();
+}
+
+void WaveformView::resizeEvent(QResizeEvent*) {
+    // Keep the zoom no coarser than whole-clip fit as the window grows, so a
+    // widened window can't leave blank space to the right of the waveform.
+    const DecodedAudio* a = deck_ ? deck_->audio() : nullptr;
+    if (a && !a->empty()) {
+        const double maxSpp =
+            std::max(1.0, static_cast<double>(a->frameCount()) / std::max(1, width()));
+        samplesPerPixel_ = std::min(samplesPerPixel_, maxSpp);
+    }
+    clampScroll();
+    emit viewChanged();
 }
 
 void WaveformView::scrubToX(double x) {
