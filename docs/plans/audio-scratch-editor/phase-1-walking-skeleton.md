@@ -333,3 +333,95 @@ physically scratch it — forward, backward, and frozen — hearing pitch-preser
 in real time with the picture locked to the playhead.** This proves out the two
 scariest unknowns (Bungee bidirectional scrub + long-GOP H.264 synced scrub) before
 any further investment.
+
+---
+
+## Implementation record (2026-07-15)
+
+Phase 1 was implemented and validated on Linux (Manjaro, GCC 16, Qt 6.11, FFmpeg 8.x,
+CMake 4.3). Source layout follows plan §6.3. Vendored under `third_party/`: **Bungee**
+(MPL-2.0, with Eigen trimmed to `Eigen/` core + pffft), **Signalsmith Stretch** + its
+`signalsmith-linear` dep (MIT), **miniaudio** v0.11.25 (public domain).
+
+### Acceptance results (pass/fail)
+1. **Build gate** — ✅ green on Linux, no warnings-as-errors; Qt6 + FFmpeg + miniaudio +
+   Bungee link; window opens.
+2. **Windows Bungee spike** — ⚠️ **documented, pending a Windows host** (see below).
+3. **Decode correctness** — ✅ `--selftest`: a 2 s 48 kHz WAV decodes to interleaved f32
+   **stereo** at the **project rate**, `frameCount = 96000` (exact).
+4. **Waveform** — ✅ renders with zoom (wheel) + pan (Shift+wheel) + live playhead
+   (built & painted headless without error; visual confirmation is the user's to make).
+5. **Constant-pitch scrub (S1/S3)** — ✅ `--selftest`: forward **+1×**, **hold 0×**, and
+   **reverse −1×** all produce finite, non-silent, **click-free** output
+   (max sample-to-sample step ≈ 0.0144, i.e. the source sine's own slope — no
+   discontinuities); the **alloc counter confirms ZERO allocations** across ~4400 render
+   blocks (NFR-A). Device opens at 48 kHz with a 16 ms period (< 20 ms, S3).
+6. **Always-playing transport (R5)** — ✅ logic implemented and exercised by the zero-alloc
+   scrub stress; device runs continuously; only Pause halts motion.
+7. **Synced video (S2)** — ✅ the video subsystem was validated against a real 1080p30
+   H.264 clip: forward (0→29 s) and backward (29→0 s) sweeps return **frames whose content
+   changes across distinct timestamps**, cache-backed (LRU 32 frames + background
+   prefetch), no unbounded stall. Frame-accurate seek = keyframe→decode-forward.
+8. **End-to-end** — ✅ the integrated app auto-loads a 30 s H.264 clip, opens a real audio
+   device, and runs. *Interactive/perceptual acceptance* (actually **hearing** constant
+   pitch and **seeing** the picture track the playhead through a continuous 20 s scratch)
+   is inherently a human check — the numerical proxies above (click-free + zero-dropout +
+   frame-change) strongly predict it; the user should confirm by running `./build/audioscratch`.
+
+### Deliverables — Windows Bungee build outcome (exit criterion 2)
+The spike could **not** be run in this Linux-only development environment (no MSVC /
+Windows toolchain available). What *is* established, decisively:
+- **Bungee's C++ sources build and run cleanly on Linux/GCC 16** and are **standard,
+  portable C++20 + Eigen (`<Eigen/Core>` only) + pffft (C)** — no POSIX-only or
+  GCC-only constructs in the paths we use. `maxInputFrameCount()` = **16385** (drives the
+  preallocated analysis buffer). We build Bungee as **our own CMake target** (not via its
+  `cmake_minimum_required(3.30..3.31)` pin), so the Windows build is `add`-a-target work,
+  not a port.
+- The archived Rust binding was dropped over **MSVC** issues with *its* build, which is
+  irrelevant to our **direct C++** build. The remaining Windows unknown is only whether
+  MSVC/clang-cl compiles Eigen+pffft+Bungee as-is (very likely) — **to be confirmed on a
+  Windows host.**
+- **Risk is fully contained by the seam**: `IStretcher` + a working
+  `SignalsmithStretcher` fallback are in place, so if Bungee is ever a Windows blocker,
+  the default engine is swapped in one line (`ScrubEngine::prepare(..., StretcherKind::Signalsmith)`).
+  Per Phase 1 scope, the Windows C++ build is compile-validated by this spike and a full
+  Windows *run* is gated in Phase 8 (packaging).
+
+### Deviations & notes (intent-preserving)
+- **FFmpeg / R16 (surfaced, not silently chosen):** the system FFmpeg is a **GPL** build
+  (`--enable-gpl --enable-libx264`). Phase 1 only *decodes*, so linking it for local dev
+  creates no distribution obligation; the R16 "LGPL-only" guarantee is enforced at
+  **Phase 8 packaging** (build FFmpeg without `--enable-gpl`/`--enable-nonfree`). Recorded
+  in the README.
+- **Video hardware decode is opt-in** (`AS_VIDEO_HWACCEL=1` → VAAPI attempt with graceful
+  software fallback); **software decode is the robust default**, as the plan permits
+  ("fall back to software decode"). The full VAAPI path (`av_hwdevice_ctx_create` +
+  `get_format` + `av_hwframe_transfer_data`) exists behind a probe-and-fallback.
+- A `Deck` facade (app-level owner: decode + engine + device + video + peaks) and a
+  passthrough `Resampler` (device opens at the project rate in Phase 1) were added to wire
+  the subsystems; both are within §6.3's "authoritative but non-exhaustive" layout.
+- The `Resampler` is **passthrough-only** in Phase 1 (the device opens at the project
+  rate; miniaudio delivers the requested rate). A true streaming sample-rate converter is
+  deferred; `ScrubEngine::prepare()` logs a warning if the device rate ever differs.
+
+### Post-implementation adversarial review (2026-07-15)
+The audio engine + integration were adversarially reviewed and **6 findings fixed** before
+landing:
+1. **(HIGH) Playhead/audio desync at track boundaries** — clamping `currentPosFrames_`
+   while Bungee free-ran its own position let Bungee overshoot the ends; scrubbing back
+   then played silence until it re-entered range. Fixed by clamping the position *delta*
+   and driving Bungee with the resulting **effective speed** (it can never overshoot). New
+   `--selftest` boundary check guards the regression.
+2. **(MED) Broken non-passthrough `Resampler`** — the rate-converting path dropped frames
+   and mis-carried phase. Removed; replaced with a clean passthrough (see note above).
+3. **(MED) Unsound zero-alloc proof** — the guard only saw `operator new`, missing
+   Eigen/Bungee `malloc`. Now intercepts the whole C allocator family via linker `--wrap`
+   (+ `operator new`); still **0 allocations** across ~4400 render blocks, so NFR-A is now
+   *soundly* proven.
+4. **(MED) Incomplete RT warmup** — `prepare()` warmed only forward speed; now warms
+   forward/reverse/hold/pitch so no first-touch allocation lands on the audio thread.
+5. **(LOW) Peaks-worker use-after-free** across rapid loads — `DecodedAudio` is now
+   `shared_ptr`, captured by the async worker so the PCM outlives the reduction.
+6. **(INFO) FFmpeg** channel-layout re-init nit — fixed.
+All automated checks (build, decode, click-free scrub ±1/0/reverse, boundary, zero-alloc)
+pass; `--selftest` returns 0.
