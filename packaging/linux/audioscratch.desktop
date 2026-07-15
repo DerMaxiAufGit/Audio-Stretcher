@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=AudioScratch
+GenericName=Audio Scratch Instrument
+Comment=Pitch-preserving audio/video scratch instrument
+Exec=audioscratch
+Icon=audioscratch
+Categories=AudioVideo;Audio;
+Terminal=false
