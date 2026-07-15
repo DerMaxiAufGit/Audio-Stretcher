@@ -28,7 +28,7 @@ WaveformView::WaveformView(QWidget* parent) : QWidget(parent) {
     timer->start(16);
 }
 
-void WaveformView::onMediaLoaded() { fitAll(); update(); }
+void WaveformView::onMediaLoaded() { fitAll(); emit viewChanged(); update(); }
 
 double WaveformView::frameAtX(double x) const {
     return scrollOffsetFrames_ + x * samplesPerPixel_;
@@ -49,8 +49,10 @@ void WaveformView::followPlayhead() {
     if (!a || a->empty()) return;
     const double pf = deck_->publishedSeconds() * a->sampleRate();
     const double x = xAtFrame(pf);
-    if (x < 0 || x > width())               // recentre when off-screen
+    if (x < 0 || x > width()) {             // recentre when off-screen
         scrollOffsetFrames_ = pf - width() * samplesPerPixel_ * 0.5;
+        emit viewChanged();
+    }
 }
 
 void WaveformView::paintEvent(QPaintEvent*) {
@@ -137,6 +139,7 @@ void WaveformView::wheelEvent(QWheelEvent* e) {
     }
     scrollOffsetFrames_ = std::clamp(scrollOffsetFrames_, 0.0,
                                      std::max(0.0, static_cast<double>(a->frameCount())));
+    emit viewChanged();
     update();
 }
 

@@ -5,12 +5,13 @@ A native **Windows + Linux** desktop app: a real-time, **pitch-preserving audio/
 move, like the mobile app *AudioStretch* (LiveScrub) — built into a **layered mini video
 editor** for making YouTube-Poop-style content and exporting it to `.mp4`.
 
-> **Status: Phase 1 (walking skeleton) implemented.** You can load an audio/video clip
-> and scratch it — pitch-preserving, bidirectional, with synced video — on an
-> always-playing transport. The full phased plan lives in
+> **Status: Phase 2 (performance controls) implemented.** On top of the Phase 1
+> scrub skeleton you now get manual **pitch** (±36 semitones + cents) and base
+> **speed**, an **A/B loop**, named **markers**, and a **turntable/varispeed** mode
+> toggle — a playable practice/scratch instrument. The full phased plan lives in
 > [`docs/plans/audio-scratch-editor/`](docs/plans/audio-scratch-editor/plan.md);
-> Phases 2–8 (manual pitch/speed, loop/markers, record→mp4, timeline, layers,
-> effects, render, packaging) are not built yet.
+> Phases 3–8 (record→mp4, timeline, layers, effects, render, packaging) are not
+> built yet.
 
 ## What it does
 
@@ -43,10 +44,14 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build -j
 ./build/audioscratch [optional-media-file]   # GUI: File ▸ Open, then drag on the waveform/video
 ./build/audioscratch --selftest               # headless: decode + click-free scrub + zero-alloc checks
+./build/audioscratch --selftest-controls      # headless: pitch / speed / loop / seek / mode-select checks
 ```
 
 Wheel = zoom the waveform, Shift+wheel = pan; drag on the waveform or the picture to scratch;
-Play/Pause is the only thing that stops the deck.
+Play/Pause is the only thing that stops the deck. Use the pitch/speed sliders and the
+**Pitch-preserve ⟷ Turntable** button below the waveform; set an A/B loop with **Set A** /
+**Set B** (drag the handles to fine-tune, tick **Loop** to enable); drop a marker at the
+playhead with **M** (or **Add Marker**) and jump between markers with **,** / **.**.
 
 > **Licensing note (R16):** the app links FFmpeg dynamically. The system FFmpeg on many
 > distros is a **GPL** build (`--enable-gpl`) — fine for local development (Phase 1 only

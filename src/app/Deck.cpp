@@ -1,5 +1,7 @@
 #include "app/Deck.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 
 #include "engine/decode/AudioDecoder.h"
@@ -9,6 +11,66 @@ namespace as {
 
 Deck::Deck(QObject* parent) : QObject(parent) {}
 Deck::~Deck() { device_.stop(); }
+
+int Deck::sampleRate() const {
+    return current_ && !current_->empty() ? current_->sampleRate() : kProjectSampleRate;
+}
+
+frame_t Deck::currentFrame() const {
+    return static_cast<frame_t>(std::llround(publishedSeconds() * sampleRate()));
+}
+
+frame_t Deck::durationFrames() const {
+    return current_ && !current_->empty() ? current_->frameCount() : 0;
+}
+
+void Deck::setPlaybackMode(PlaybackMode m) {
+    state_.playbackMode = m;
+    engine_.setPlaybackMode(m);
+    emit stateChanged();
+}
+
+void Deck::setLoop(frame_t begin, frame_t end) {
+    state_.setLoop(begin, end);
+    engine_.setLoop(state_.loopBeginFrame, state_.loopEndFrame);
+    emit stateChanged();
+}
+
+void Deck::setLoopEnabled(bool on) {
+    state_.loopEnabled = on;
+    engine_.setLoopEnabled(on);
+    emit stateChanged();
+}
+
+uint32_t Deck::addMarker(frame_t frame, const QString& label) {
+    const frame_t clamped = std::clamp<frame_t>(frame, 0, durationFrames());
+    const uint32_t id = state_.addMarker(clamped, label);
+    emit stateChanged();
+    return id;
+}
+
+void Deck::addMarkerAtPlayhead() { addMarker(currentFrame()); }
+
+void Deck::removeMarker(uint32_t id) {
+    state_.removeMarker(id);
+    emit stateChanged();
+}
+
+void Deck::renameMarker(uint32_t id, const QString& label) {
+    if (Marker* m = state_.markerById(id)) { m->label = label; emit stateChanged(); }
+}
+
+void Deck::jumpToFrame(frame_t frame) {
+    engine_.jumpToFrame(std::clamp<frame_t>(frame, 0, durationFrames()));
+}
+
+void Deck::jumpToNextMarker() {
+    if (const Marker* m = state_.nextMarkerAfter(currentFrame())) jumpToFrame(m->frame);
+}
+
+void Deck::jumpToPrevMarker() {
+    if (const Marker* m = state_.prevMarkerBefore(currentFrame())) jumpToFrame(m->frame);
+}
 
 bool Deck::start() {
     // Open the device up front so the deck is "always playing" (silence until a
@@ -42,6 +104,16 @@ bool Deck::load(const QString& path) {
     // Independent video context (own seek cursor). Audio-only clips -> no video.
     video_.close();
     video_.open(path.toStdString());
+
+    // Fresh clip: reset the session (loop off, markers cleared, pitch-preserve) and
+    // push clean defaults to the engine control block (Phase 2 Task 9).
+    state_.reset();
+    engine_.setPitchRatio(1.0f);
+    engine_.setBaseRate(1.0f);
+    engine_.setLoopEnabled(false);
+    engine_.setLoop(0, 0);
+    engine_.setPlaybackMode(PlaybackMode::PitchPreserving);
+    emit stateChanged();
 
     engine_.seekSeconds(0.0);
     engine_.setPlaying(true);

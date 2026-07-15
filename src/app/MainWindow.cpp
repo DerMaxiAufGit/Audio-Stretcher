@@ -4,11 +4,14 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QMenuBar>
+#include <QShortcut>
 #include <QStatusBar>
 #include <QVBoxLayout>
 #include <QWidget>
 
 #include "app/Deck.h"
+#include "ui/LoopMarkerBar.h"
+#include "ui/PitchSpeedControls.h"
 #include "ui/TransportBar.h"
 #include "ui/VideoView.h"
 #include "ui/WaveformView.h"
@@ -23,10 +26,14 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     video_ = new VideoView(this);
     waveform_ = new WaveformView(this);
+    loopBar_ = new LoopMarkerBar(this);
+    pitchSpeed_ = new PitchSpeedControls(this);
     transport_ = new TransportBar(this);
     video_->setDeck(deck_);
     waveform_->setDeck(deck_);
     transport_->setDeck(deck_);
+    loopBar_->setDeck(deck_);
+    loopBar_->setWaveform(waveform_);
 
     auto* central = new QWidget(this);
     auto* layout = new QVBoxLayout(central);
@@ -34,8 +41,29 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     layout->setSpacing(0);
     layout->addWidget(video_, 3);
     layout->addWidget(waveform_, 1);
+    layout->addWidget(loopBar_, 0);      // aligned directly under the waveform
+    layout->addWidget(pitchSpeed_, 0);
     layout->addWidget(transport_, 0);
     setCentralWidget(central);
+
+    // --- Wire performance controls to the deck (model + engine control block) ---
+    connect(pitchSpeed_, &PitchSpeedControls::pitchRatioChanged,
+            deck_, &Deck::setPitchRatio);
+    connect(pitchSpeed_, &PitchSpeedControls::baseRateChanged,
+            deck_, &Deck::setBaseRate);
+    connect(pitchSpeed_, &PitchSpeedControls::playbackModeChanged,
+            deck_, &Deck::setPlaybackMode);
+    connect(deck_, &Deck::stateChanged, loopBar_, &LoopMarkerBar::syncFromState);
+
+    // --- Marker hotkeys: M drop, ',' prev, '.' next ---
+    auto* addMk = new QShortcut(QKeySequence(Qt::Key_M), this);
+    connect(addMk, &QShortcut::activated, this, [this] {
+        if (deck_->audio()) deck_->addMarkerAtPlayhead();
+    });
+    auto* prevMk = new QShortcut(QKeySequence(Qt::Key_Comma), this);
+    connect(prevMk, &QShortcut::activated, this, [this] { deck_->jumpToPrevMarker(); });
+    auto* nextMk = new QShortcut(QKeySequence(Qt::Key_Period), this);
+    connect(nextMk, &QShortcut::activated, this, [this] { deck_->jumpToNextMarker(); });
 
     auto* fileMenu = menuBar()->addMenu("&File");
     auto* openAct = new QAction("&Open…", this);
@@ -50,6 +78,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     connect(deck_, &Deck::loaded, this, [this] {
         waveform_->onMediaLoaded();
+        pitchSpeed_->resetToDefaults();      // 0 st / 1.0x / pitch-preserve
+        loopBar_->syncFromState();           // clear A/B + markers in the UI
         statusBar()->showMessage(
             QString("Loaded — %1 s%2")
                 .arg(deck_->durationSeconds(), 0, 'f', 2)

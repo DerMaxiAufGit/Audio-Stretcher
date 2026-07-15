@@ -81,6 +81,7 @@ set(APP_SOURCES
   src/engine/decode/FrameCache.cpp
   src/engine/audio/BungeeStretcher.cpp
   src/engine/audio/SignalsmithStretcher.cpp
+  src/engine/audio/VarispeedStretcher.cpp
   src/engine/audio/Resampler.cpp
   src/engine/audio/ScrubEngine.cpp
   src/engine/audio/AudioDevice.cpp
@@ -89,6 +90,8 @@ set(APP_SOURCES
   src/ui/WaveformView.cpp
   src/ui/VideoView.cpp
   src/ui/TransportBar.cpp
+  src/ui/PitchSpeedControls.cpp
+  src/ui/LoopMarkerBar.cpp
   src/selftest/SelfTest.cpp
 )
 
@@ -114,5 +117,10 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 # --selftest harness is built into the binary (Phase 1 deliverable).
+# The Phase 2 control-engine checks reuse the same in-binary allocation guard
+# (the linker --wrap machinery above lives in SelfTest.cpp), so they run via a
+# second flag rather than a standalone tests/ executable that would have to
+# replicate that guard. Both are registered as independent ctest cases.
 enable_testing()
 add_test(NAME selftest COMMAND audioscratch --selftest)
+add_test(NAME ScrubEngineControls COMMAND audioscratch --selftest-controls)

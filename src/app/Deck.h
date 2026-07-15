@@ -13,6 +13,8 @@
 #include "engine/audio/ScrubEngine.h"
 #include "engine/audio/WaveformPeaks.h"
 #include "engine/decode/DecodedAudio.h"
+#include "engine/model/DeckState.h"
+#include "engine/model/Project.h"
 #include "engine/video/VideoScrubber.h"
 
 namespace as {
@@ -38,6 +40,31 @@ public:
     double publishedSeconds() const { return engine_.publishedSeconds(); }
     double durationSeconds() const  { return engine_.durationSeconds(); }
 
+    // --- Phase 2 performance controls: update the model AND the engine control
+    //     block. The UI calls these; it never touches the audio thread directly. ---
+    void setPitchRatio(float ratio)  { engine_.setPitchRatio(ratio); }
+    void setBaseRate(float rate)     { engine_.setBaseRate(rate); }
+    void setPlaybackMode(PlaybackMode m);
+
+    void setLoop(frame_t begin, frame_t end);
+    void setLoopEnabled(bool on);
+
+    uint32_t addMarker(frame_t frame, const QString& label = {});
+    void     addMarkerAtPlayhead();
+    void     removeMarker(uint32_t id);
+    void     renameMarker(uint32_t id, const QString& label);
+
+    void jumpToFrame(frame_t frame);       // discrete glitch-free seek
+    void jumpToNextMarker();
+    void jumpToPrevMarker();
+
+    // Playhead / units helpers for the UI.
+    int      sampleRate() const;
+    frame_t  currentFrame() const;
+    frame_t  durationFrames() const;
+
+    const DeckState& state() const    { return state_; }
+
     const DecodedAudio* audio() const { return current_.get(); }
     WaveformPeaks* peaks()            { return &peaks_; }
     VideoScrubber* video()            { return &video_; }
@@ -46,8 +73,11 @@ public:
 
 signals:
     void loaded();                         // a new clip finished loading
+    void stateChanged();                   // loop / markers / mode edited (UI redraw)
 
 private:
+    DeckState state_;                      // authoritative UI-thread session state
+
     ScrubEngine   engine_;
     AudioDevice   device_;
     WaveformPeaks peaks_;

@@ -12,6 +12,8 @@ class Deck;
 class VideoView;
 class WaveformView;
 class TransportBar;
+class PitchSpeedControls;
+class LoopMarkerBar;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -29,6 +31,8 @@ private:
     VideoView* video_ = nullptr;
     WaveformView* waveform_ = nullptr;
     TransportBar* transport_ = nullptr;
+    PitchSpeedControls* pitchSpeed_ = nullptr;
+    LoopMarkerBar* loopBar_ = nullptr;
 };
 
 } // namespace as

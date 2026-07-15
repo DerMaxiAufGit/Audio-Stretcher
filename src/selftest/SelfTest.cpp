@@ -284,6 +284,216 @@ void testZeroAlloc() {
     check(finite, "engine output finite after stress");
 }
 
+// ===========================================================================
+// Phase 2 — performance-control engine checks (plan Phase 2 Task 10).
+// Drives ScrubEngine directly (no GUI) through the same control surface the UI
+// uses (setPitchRatio / setBaseRate / setLoop / jumpToFrame / setPlaybackMode).
+// ===========================================================================
+
+// Upward zero-crossings per second on the mono-averaged buffer ≈ fundamental Hz.
+double estimateFreq(const std::vector<float>& inter, int ch, int rate) {
+    const std::size_t frames = ch > 0 ? inter.size() / ch : 0;
+    if (frames < 2) return 0.0;
+    auto mono = [&](std::size_t i) {
+        float s = 0.0f; for (int c = 0; c < ch; ++c) s += inter[i * ch + c]; return s / ch;
+    };
+    int crossings = 0;
+    float prev = mono(0);
+    for (std::size_t i = 1; i < frames; ++i) {
+        const float v = mono(i);
+        if (prev <= 0.0f && v > 0.0f) ++crossings;
+        prev = v;
+    }
+    return crossings / (static_cast<double>(frames) / rate);
+}
+
+// Render `warmup` blocks (discarded) then `collect` blocks (concatenated).
+std::vector<float> renderAndCollect(ScrubEngine& e, int warmup, int collect, int blk) {
+    std::vector<float> tmp(static_cast<std::size_t>(blk) * 2), out;
+    for (int i = 0; i < warmup; ++i) e.render(tmp.data(), blk);
+    for (int i = 0; i < collect; ++i) {
+        e.render(tmp.data(), blk);
+        out.insert(out.end(), tmp.begin(), tmp.end());
+    }
+    return out;
+}
+
+// --- Controls check 1: pitch reaches the stretcher, independent of position -----
+void testPitchControl() {
+    std::printf("\nPitch control: constant-pitch transpose (Task 10.1, R6)\n");
+    const int rate = kProjectSampleRate, blk = 512;
+    DecodedAudio sine = makeSine(220.0, 5.0);
+    ScrubEngine e; e.prepare(rate, blk); e.setAudio(&sine);
+    e.setPlaying(true); e.setScrubbing(false);
+    e.setPlaybackMode(PlaybackMode::PitchPreserving); e.setBaseRate(1.0f);
+
+    // +5 semitones must compute to ~1.3348 (matches the UI formula 2^(semi/12)).
+    const double r5 = std::pow(2.0, 5.0 / 12.0);
+    check(std::fabs(r5 - 1.334839854) < 1e-3, "+5 st ratio ≈ 1.3348",
+          ("ratio=" + std::to_string(r5)).c_str());
+
+    e.seekSeconds(0.0); e.setPitchRatio(1.0f);
+    auto o1 = renderAndCollect(e, 8, 24, blk);
+    const double f1 = estimateFreq(o1, 2, rate);
+    const double sec1 = e.publishedSeconds();
+
+    e.seekSeconds(0.0); e.setPitchRatio(2.0f);
+    auto o2 = renderAndCollect(e, 8, 24, blk);
+    const double f2 = estimateFreq(o2, 2, rate);
+    const double sec2 = e.publishedSeconds();
+
+    e.seekSeconds(0.0); e.setPitchRatio(static_cast<float>(r5));
+    auto o5 = renderAndCollect(e, 8, 24, blk);
+    const double f5 = estimateFreq(o5, 2, rate);
+
+    check(f1 > 170.0 && f1 < 280.0, "pitch 0 st ≈ source 220 Hz",
+          ("f=" + std::to_string(f1)).c_str());
+    check(f1 > 1.0 && f2 / f1 > 1.6 && f2 / f1 < 2.4, "+12 st doubles frequency",
+          ("ratio=" + std::to_string(f2 / f1)).c_str());
+    check(f1 > 1.0 && f5 / f1 > 1.2 && f5 / f1 < 1.47, "+5 st shifts by ≈1.335x",
+          ("ratio=" + std::to_string(f5 / f1)).c_str());
+    check(std::fabs(sec1 - sec2) < 0.03, "playhead advance unchanged by pitch",
+          ("d=" + std::to_string(std::fabs(sec1 - sec2))).c_str());
+}
+
+// --- Controls check 2/3: A/B loop wrap during auto-play; grab overrides ---------
+void testLoop() {
+    std::printf("\nA/B loop: auto-play wraps B->A; grab overrides (Task 10.2/10.3, R8)\n");
+    const int rate = kProjectSampleRate, blk = 512;
+    DecodedAudio sine = makeSine(220.0, 2.0);   // 2 s
+    ScrubEngine e; e.prepare(rate, blk); e.setAudio(&sine);
+    e.setPlaying(true); e.setScrubbing(false); e.setBaseRate(1.0f); e.setPitchRatio(1.0f);
+
+    const frame_t A = static_cast<frame_t>(0.5 * rate);
+    const frame_t B = static_cast<frame_t>(1.0 * rate);
+    e.setLoop(A, B); e.setLoopEnabled(true); e.seekSeconds(0.6);
+
+    std::vector<float> tmp(static_cast<std::size_t>(blk) * 2);
+    double maxSec = 0.0, prev = 0.6; bool wrapped = false;
+    for (int i = 0; i < 500; ++i) {
+        e.render(tmp.data(), blk);
+        const double s = e.publishedSeconds();
+        maxSec = std::max(maxSec, s);
+        if (prev > 0.9 && s < 0.7) wrapped = true;   // jumped back near A
+        prev = s;
+    }
+    check(wrapped, "playhead wraps B->A during auto-play");
+    check(maxSec < 1.05, "playhead never runs far past B while looping",
+          ("maxSec=" + std::to_string(maxSec)).c_str());
+
+    // Grab (scrub) past B: the loop must be ignored while grabbed.
+    e.setScrubbing(true); e.seekSeconds(0.6); e.setTargetSeconds(1.6);
+    double grabMax = 0.0;
+    for (int i = 0; i < 120; ++i) {
+        e.render(tmp.data(), blk);
+        grabMax = std::max(grabMax, e.publishedSeconds());
+    }
+    check(grabMax > 1.05, "grabbed drag crosses B (loop ignored while grabbed)",
+          ("grabMax=" + std::to_string(grabMax)).c_str());
+
+    // Release the grab with the playhead OUTSIDE the loop (past B): the loop must
+    // resume — i.e. the playhead is pulled back into [A,B). This is the counterpart
+    // to the discrete-jump case: grab-release is NOT suppressed. (Criterion 6.)
+    e.setScrubbing(false);
+    double afterRelease = 9.9;
+    for (int i = 0; i < 60; ++i) { e.render(tmp.data(), blk); afterRelease = std::min(afterRelease, e.publishedSeconds()); }
+    check(afterRelease < 1.0, "loop resumes after releasing a grab outside the region",
+          ("minAfterRelease=" + std::to_string(afterRelease)).c_str());
+}
+
+// --- Controls check 4: discrete seek (marker / A-B jump) -------------------------
+void testSeek() {
+    std::printf("\nDiscrete seek: jumpToFrame snaps the playhead (Task 10.4, R8)\n");
+    const int rate = kProjectSampleRate, blk = 512;
+    DecodedAudio sine = makeSine(220.0, 2.0);
+    ScrubEngine e; e.prepare(rate, blk); e.setAudio(&sine);
+    e.setScrubbing(false); e.setPlaying(false);   // paused: position holds after jump
+    e.setLoopEnabled(false);
+
+    std::vector<float> tmp(static_cast<std::size_t>(blk) * 2);
+    e.jumpToFrame(static_cast<frame_t>(1.2 * rate));
+    for (int i = 0; i < 3; ++i) e.render(tmp.data(), blk);
+    check(std::fabs(e.publishedSeconds() - 1.2) < 0.02, "jumpToFrame snaps to target",
+          ("pos=" + std::to_string(e.publishedSeconds())).c_str());
+
+    // A jump that lands OUTSIDE an active loop must be honored (marker/handle jump),
+    // not yanked back to A — for several blocks, not just one. (Regression: the loop
+    // snap-in previously overrode discrete seeks.)
+    e.setLoop(static_cast<frame_t>(0.4 * rate), static_cast<frame_t>(0.8 * rate));
+    e.setLoopEnabled(true);
+    e.setPlaying(true); e.setScrubbing(false);
+    e.jumpToFrame(static_cast<frame_t>(1.1 * rate));   // past B (=0.8s)
+    double minPos = 9.9;
+    for (int i = 0; i < 8; ++i) { e.render(tmp.data(), blk); minPos = std::min(minPos, e.publishedSeconds()); }
+    check(minPos > 0.85, "jump outside active loop is honored (not snapped to A)",
+          ("minPos=" + std::to_string(minPos)).c_str());
+
+    // A jump back INSIDE the loop re-engages normal looping (playhead stays in [A,B)).
+    e.jumpToFrame(static_cast<frame_t>(0.5 * rate));
+    double maxIn = 0.0;
+    for (int i = 0; i < 200; ++i) { e.render(tmp.data(), blk); maxIn = std::max(maxIn, e.publishedSeconds()); }
+    check(maxIn < 0.85, "jump inside loop re-engages looping (wraps at B=0.8)",
+          ("maxIn=" + std::to_string(maxIn)).c_str());
+}
+
+// --- Controls check 5: mode select (R18) + zero-alloc across switches ------------
+void testModeSelect() {
+    std::printf("\nTurntable/varispeed mode select + NFR-A (Task 10.5, R18)\n");
+    const int rate = kProjectSampleRate, blk = 512;
+    DecodedAudio sine = makeSine(220.0, 6.0);
+    ScrubEngine e; e.prepare(rate, blk); e.setAudio(&sine);
+    e.setPlaying(true); e.setScrubbing(false); e.setLoopEnabled(false);
+
+    // Varispeed: pitch bends with speed; pitchRatio is inert.
+    e.setPlaybackMode(PlaybackMode::Varispeed);
+    e.setBaseRate(1.0f); e.setPitchRatio(1.0f); e.seekSeconds(0.0);
+    const double fv1 = estimateFreq(renderAndCollect(e, 8, 24, blk), 2, rate);
+    e.setBaseRate(2.0f); e.seekSeconds(0.0);
+    const double fv2 = estimateFreq(renderAndCollect(e, 8, 24, blk), 2, rate);
+    e.setBaseRate(1.0f); e.setPitchRatio(2.0f); e.seekSeconds(0.0);
+    const double fv3 = estimateFreq(renderAndCollect(e, 8, 24, blk), 2, rate);
+
+    check(fv1 > 1.0 && fv2 / fv1 > 1.6 && fv2 / fv1 < 2.4, "varispeed: pitch bends with speed",
+          ("ratio=" + std::to_string(fv2 / fv1)).c_str());
+    check(fv1 > 1.0 && fv3 / fv1 > 0.8 && fv3 / fv1 < 1.25, "varispeed: pitchRatio inert",
+          ("ratio=" + std::to_string(fv3 / fv1)).c_str());
+
+    // Pitch-preserving contrast: pitchRatio drives pitch, base speed does not.
+    e.setPlaybackMode(PlaybackMode::PitchPreserving);
+    e.setBaseRate(1.0f); e.setPitchRatio(1.0f); e.seekSeconds(0.0);
+    const double fp1 = estimateFreq(renderAndCollect(e, 8, 24, blk), 2, rate);
+    e.setPitchRatio(2.0f); e.seekSeconds(0.0);
+    const double fp2 = estimateFreq(renderAndCollect(e, 8, 24, blk), 2, rate);
+    check(fp1 > 1.0 && fp2 / fp1 > 1.6 && fp2 / fp1 < 2.4, "pitch-preserve: pitchRatio drives pitch",
+          ("ratio=" + std::to_string(fp2 / fp1)).c_str());
+
+    // Zero allocations across repeated mode switches + control edits (NFR-A).
+    std::vector<float> tmp(static_cast<std::size_t>(blk) * 2);
+    for (int i = 0; i < 8; ++i) e.render(tmp.data(), blk);   // settle
+    g_rtAllocs.store(0);
+    g_rtGuard.store(true);
+    for (int i = 0; i < 2000; ++i) {
+        e.setPlaybackMode((i / 50) % 2 ? PlaybackMode::Varispeed
+                                       : PlaybackMode::PitchPreserving);
+        e.setPitchRatio(1.0f + 0.5f * std::sin(i * 0.01));   // stays in [0.5,1.5] (warmed)
+        e.setBaseRate(1.0f + 0.5f * std::sin(i * 0.013));
+        if (i % 200 == 0) {
+            e.setLoop(2000, 60000 + i);
+            e.setLoopEnabled((i % 400) < 200);
+            e.jumpToFrame(5000 + i);
+        }
+        e.render(tmp.data(), blk);
+    }
+    g_rtGuard.store(false);
+    const long allocs = g_rtAllocs.load();
+    check(allocs == 0, "zero allocations across mode switches + control edits",
+          ("allocs=" + std::to_string(allocs)).c_str());
+
+    bool finite = true;
+    for (float v : tmp) if (!std::isfinite(v)) { finite = false; break; }
+    check(finite, "engine output finite after mode-switch stress");
+}
+
 } // namespace
 
 int runSelfTest() {
@@ -293,6 +503,19 @@ int runSelfTest() {
     testStretch();
     testBoundary();
     testZeroAlloc();
+    std::printf("\n=== %s (%d failure%s) ===\n",
+                g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
+                g_failures == 1 ? "" : "s");
+    return g_failures == 0 ? 0 : 1;
+}
+
+int runControlsSelfTest() {
+    std::printf("=== AudioScratch self-test (Phase 2 — performance controls) ===\n");
+    g_failures = 0;
+    testPitchControl();
+    testLoop();
+    testSeek();
+    testModeSelect();
     std::printf("\n=== %s (%d failure%s) ===\n",
                 g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");

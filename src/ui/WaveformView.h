@@ -20,6 +20,14 @@ public:
     void setDeck(Deck* deck) { deck_ = deck; }
     void onMediaLoaded();      // reset zoom/scroll to fit the new clip
 
+    // Horizontal time mapping, shared with LoopMarkerBar so its handles/flags line
+    // up with the waveform (both widgets are full-width with x=0 aligned).
+    double frameAtX(double x) const;
+    double xAtFrame(double frame) const;
+
+signals:
+    void viewChanged();        // zoom / scroll changed — realign the loop/marker bar
+
 protected:
     void paintEvent(QPaintEvent*) override;
     void wheelEvent(QWheelEvent*) override;
@@ -28,8 +36,6 @@ protected:
     void mouseReleaseEvent(QMouseEvent*) override;
 
 private:
-    double frameAtX(double x) const;
-    double xAtFrame(double frame) const;
     void   scrubToX(double x);
     void   fitAll();
     void   followPlayhead();

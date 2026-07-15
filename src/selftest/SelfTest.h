@@ -4,5 +4,6 @@
 // success, non-zero if any check fails. Invoked via `audioscratch --selftest`.
 
 namespace as {
-int runSelfTest();
+int runSelfTest();          // Phase 1: decode + scrub + boundary + zero-alloc
+int runControlsSelfTest();  // Phase 2: pitch / speed / loop / seek / mode select
 }
