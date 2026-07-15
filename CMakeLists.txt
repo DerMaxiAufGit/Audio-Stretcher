@@ -130,13 +130,17 @@ set(APP_SOURCES
   src/engine/audio/Resampler.cpp
   src/engine/audio/ScrubEngine.cpp
   src/engine/audio/AudioDevice.cpp
+  src/engine/audio/AudioCapture.cpp
   src/engine/audio/WaveformPeaks.cpp
+  src/engine/io/WavWriter.cpp
   src/engine/video/VideoScrubber.cpp
   src/ui/WaveformView.cpp
   src/ui/VideoView.cpp
   src/ui/TransportBar.cpp
   src/ui/PitchSpeedControls.cpp
   src/ui/LoopMarkerBar.cpp
+  src/ui/InstantReplayControls.cpp
+  src/ui/SettingsDialog.cpp
   src/selftest/SelfTest.cpp
 )
 

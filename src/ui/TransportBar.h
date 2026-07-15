@@ -9,6 +9,7 @@
 
 class QPushButton;
 class QLabel;
+class QSlider;
 
 namespace as {
 
@@ -27,6 +28,9 @@ private:
     Deck* deck_ = nullptr;
     QPushButton* playButton_ = nullptr;
     QLabel* timeLabel_ = nullptr;
+    QPushButton* muteButton_ = nullptr;
+    QSlider* volumeSlider_ = nullptr;
+    QLabel* volumeLabel_ = nullptr;
 };
 
 } // namespace as

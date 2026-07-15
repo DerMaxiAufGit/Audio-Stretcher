@@ -9,6 +9,7 @@
 #include <QObject>
 #include <QString>
 
+#include "engine/audio/AudioCapture.h"
 #include "engine/audio/AudioDevice.h"
 #include "engine/audio/ScrubEngine.h"
 #include "engine/audio/WaveformPeaks.h"
@@ -46,6 +47,12 @@ public:
     void setBaseRate(float rate)     { engine_.setBaseRate(rate); }
     void setPlaybackMode(PlaybackMode m);
 
+    // Master output gain (linear, 0..2; 1 = unity). Thread-safe passthrough — the
+    // TransportBar volume slider / mute toggle drive these; the engine applies the
+    // gain on the RT thread as a lock-free atomic store (see ScrubEngine::setGain).
+    void setGain(float g)            { engine_.setGain(g); }
+    float gain() const               { return engine_.gain(); }
+
     void setLoop(frame_t begin, frame_t end);
     void setLoopEnabled(bool on);
 
@@ -57,6 +64,11 @@ public:
     void jumpToFrame(frame_t frame);       // discrete glitch-free seek
     void jumpToNextMarker();
     void jumpToPrevMarker();
+
+    // --- Instant Replay: rolling desktop-loopback capture (ShadowPlay-style) ---
+    void setCaptureEnabled(bool on);       // arm/disarm the rolling capture (persists state)
+    void applyCaptureSettings();           // re-read QSettings; restart capture if running
+    bool clipLastSeconds();                // snapshot last N s -> .wav + load into editor
 
     // Playhead / units helpers for the UI.
     int      sampleRate() const;
@@ -74,6 +86,7 @@ public:
 signals:
     void loaded();                         // a new clip finished loading
     void stateChanged();                   // loop / markers / mode edited (UI redraw)
+    void captureActiveChanged(bool active);// rolling capture's ACTUAL armed state (start ok?)
 
 private:
     DeckState state_;                      // authoritative UI-thread session state
@@ -82,6 +95,10 @@ private:
     AudioDevice   device_;
     WaveformPeaks peaks_;
     VideoScrubber video_;
+
+    // Rolling background capture for Instant Replay (owned; created in the ctor,
+    // stopped in the dtor). Independent of the playback device/engine above.
+    std::unique_ptr<AudioCapture> capture_;
 
     // shared_ptr (not unique_ptr): the RT thread needs the previous buffer alive
     // one generation across a swap, AND the async peaks worker captures a copy so

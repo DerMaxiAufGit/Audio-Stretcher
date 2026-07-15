@@ -14,6 +14,17 @@ namespace as {
 namespace {
 constexpr double kMaxScrubSpeed = 32.0;   // clamp scrub velocity (± octaves of rate)
 constexpr double kSpeedSmoothing = 0.5;   // one-pole toward target speed (scrub only)
+
+// Continuous, monotonic soft-knee limiter. Transparent for |y| <= kKnee,
+// smoothly saturates toward +/-1 above the knee; output is bounded to [-1, 1].
+static inline float softKnee(float y) {
+    constexpr float kKnee = 0.9f;
+    const float a = std::fabs(y);
+    if (a <= kKnee) return y;                       // transparent region
+    const float over = (a - kKnee) / (1.0f - kKnee);
+    const float shaped = kKnee + (1.0f - kKnee) * std::tanh(over);
+    return std::copysign(shaped, y);
+}
 }
 
 // SampleSource bound to whichever DecodedAudio is currently loaded. Reads are
@@ -266,6 +277,19 @@ void ScrubEngine::renderBlock(float* out, int frames) {
     req.reset = reset;
 
     activeStretcher_->process(req, out, frames, *source_);
+
+    // --- Master gain + soft-clip (final stage; NFR-A: alloc-free, lock-free) ---
+    // Read the linear gain ONCE per block, then run every interleaved sample
+    // through a continuous soft-knee limiter. Below the knee it is transparent;
+    // above it saturates smoothly toward +/-1, so the transfer function has no
+    // discontinuity and the device output is always bounded to [-1,1] -- even at
+    // unity gain, where a stretcher transient could otherwise overshoot unclipped.
+    const float gain = control_.gain.load(std::memory_order_acquire);
+    const int total = frames * ch;
+    for (int i = 0; i < total; ++i) {
+        float s = gain * out[i];
+        out[i] = softKnee(s);
+    }
 
     currentPosFrames_ = nextPos;
     publishedPlayheadSeconds_.store(currentPosFrames_ / projectRate_);

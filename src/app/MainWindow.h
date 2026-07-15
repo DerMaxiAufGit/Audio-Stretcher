@@ -14,6 +14,7 @@ class WaveformView;
 class TransportBar;
 class PitchSpeedControls;
 class LoopMarkerBar;
+class InstantReplayControls;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -33,6 +34,7 @@ private:
     TransportBar* transport_ = nullptr;
     PitchSpeedControls* pitchSpeed_ = nullptr;
     LoopMarkerBar* loopBar_ = nullptr;
+    InstantReplayControls* instantReplay_ = nullptr;
 };
 
 } // namespace as

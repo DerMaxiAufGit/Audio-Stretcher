@@ -39,6 +39,7 @@ struct ScrubControl {
     std::atomic<int64_t>  seekTargetFrame{0};    // discrete jump target (marker / A-B click)
     std::atomic<uint32_t> seekSeq{0};            // bumped per jump; RT acts when it changes
     std::atomic<PlaybackMode> playbackMode{PlaybackMode::PitchPreserving};  // live-deck mode (R18)
+    std::atomic<float>    gain{1.0f};            // master output gain (linear; 1 = 0 dB, range 0..2)
 };
 
 enum class StretcherKind { Bungee, Signalsmith };
@@ -68,8 +69,13 @@ public:
     void jumpToFrame(frame_t frame);            // discrete glitch-free seek (marker / A-B click)
     void setPlaybackMode(PlaybackMode m) { control_.playbackMode.store(m, std::memory_order_release); }
 
+    // Master output gain (linear): 1.0 = unity / 0 dB, valid range 0.0..2.0. Applied
+    // as the final RT stage with soft-clip protection so the device never clips.
+    void setGain(float g)            { control_.gain.store(g, std::memory_order_release); }
+
     bool   playing()   const { return control_.playing.load(); }
     bool   scrubbing() const { return control_.scrubbing.load(); }
+    float  gain()      const { return control_.gain.load(std::memory_order_acquire); }
     double publishedSeconds() const { return publishedPlayheadSeconds_.load(); }
     double durationSeconds() const;
 
