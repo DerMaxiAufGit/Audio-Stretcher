@@ -1,0 +1,48 @@
+# ---- Build output ----
+/build/
+/out/
+/cmake-build-*/
+build*/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+compile_commands.json
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.app/
+
+# ---- Qt ----
+*.moc
+moc_*.cpp
+qrc_*.cpp
+ui_*.h
+*.qmlc
+*.jsc
+
+# ---- Packaging artifacts ----
+*.AppImage
+*.AppDir/
+*.flatpak
+/packaging/**/dist/
+
+# ---- Third-party fetched binaries/builds ----
+/third_party/**/build/
+
+# ---- IDE / editor ----
+.vscode/
+.idea/
+*.user
+*.kate-swp
+.cache/
+
+# ---- OS ----
+.DS_Store
+Thumbs.db
