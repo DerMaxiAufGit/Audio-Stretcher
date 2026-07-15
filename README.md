@@ -11,7 +11,7 @@ editor** for making YouTube-Poop-style content and exporting it to `.mp4`.
 > toggle — a playable practice/scratch instrument. The full phased plan lives in
 > [`docs/plans/audio-scratch-editor/`](docs/plans/audio-scratch-editor/plan.md);
 > Phases 3–8 (record→mp4, timeline, layers, effects, render, packaging) are not
-> built yet. A native **Windows** x64 build now exists alongside Linux (v0.2.0),
+> built yet. A native **Windows** x64 build now exists alongside Linux (v0.2.1),
 > built with **MSVC 2022 + Qt 6 + LGPL FFmpeg** and packaged as a self-contained
 > `.zip` — see [`packaging/windows/README.md`](packaging/windows/README.md).
 

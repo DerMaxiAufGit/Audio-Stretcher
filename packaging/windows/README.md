@@ -89,7 +89,7 @@ dev shell. Launching `audioscratch.exe` with no args opens the "AudioScratch" wi
 pwsh -File packaging\windows\deploy.ps1
 ```
 
-produces `dist\AudioScratch-v0.2.0-win64.zip` (≈ 58 MB zipped, ≈ 135 MB unpacked). Run
+produces `dist\AudioScratch-v0.2.1-win64.zip` (≈ 58 MB zipped, ≈ 135 MB unpacked). Run
 the build first — `deploy.ps1` expects `build-win\audioscratch.exe`. See the script's
 header comment for its parameters (`-QtDir`, `-FFmpegDir`, `-Version`, `-OutDir`;
 defaults match the paths above / the `QTDIR` + `FFMPEG_DIR` env vars).

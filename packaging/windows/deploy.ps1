@@ -18,14 +18,14 @@
 
 .EXAMPLE
   pwsh -File packaging\windows\deploy.ps1
-  pwsh -File packaging\windows\deploy.ps1 -Version 0.2.0 -OutDir C:\dist
+  pwsh -File packaging\windows\deploy.ps1 -Version 0.2.1 -OutDir C:\dist
 #>
 [CmdletBinding()]
 param(
   [string]$BuildDir  = "$PSScriptRoot\..\..\build-win",
   [string]$QtDir     = $(if ($env:QTDIR)      { $env:QTDIR }      else { "C:\Qt\6.8.3\msvc2022_64" }),
   [string]$FFmpegDir = $(if ($env:FFMPEG_DIR) { $env:FFMPEG_DIR } else { "C:\Users\maxi\audioscratch-winbuild\ffmpeg" }),
-  [string]$Version   = "0.2.0",
+  [string]$Version   = "0.2.1",
   [string]$OutDir    = "$PSScriptRoot\..\..\dist"
 )
 $ErrorActionPreference = 'Stop'
