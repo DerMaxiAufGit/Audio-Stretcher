@@ -11,7 +11,9 @@ editor** for making YouTube-Poop-style content and exporting it to `.mp4`.
 > toggle — a playable practice/scratch instrument. The full phased plan lives in
 > [`docs/plans/audio-scratch-editor/`](docs/plans/audio-scratch-editor/plan.md);
 > Phases 3–8 (record→mp4, timeline, layers, effects, render, packaging) are not
-> built yet.
+> built yet. A native **Windows** x64 build now exists alongside Linux (v0.1.0),
+> built with **MSVC 2022 + Qt 6 + LGPL FFmpeg** and packaged as a self-contained
+> `.zip` — see [`packaging/windows/README.md`](packaging/windows/README.md).
 
 ## What it does
 
@@ -58,6 +60,35 @@ playhead with **M** (or **Add Marker**) and jump between markers with **,** / **
 > *decodes*), but the **packaged** build (Phase 8) must link an FFmpeg built *without*
 > `--enable-gpl`/`--enable-nonfree` to keep the permissive-only guarantee. Windows is a
 > build target; a full Windows run is gated in Phase 8.
+
+## Building (Windows)
+
+Native x64 build with **MSVC 2022 + Qt 6.8.3 + BtbN LGPL-shared FFmpeg**. Bungee
+compiles cleanly under MSVC, so the stretcher is the same as Linux (no Signalsmith
+fallback). Get Qt without a Qt account via `aqtinstall`, and FFmpeg from the BtbN
+LGPL-shared prebuilt:
+
+```sh
+python -m pip install -U aqtinstall
+python -m aqt install-qt windows desktop 6.8.3 win64_msvc2022_64 --outputdir C:\Qt
+# FFmpeg: extract ffmpeg-master-latest-win64-lgpl-shared.zip (github.com/BtbN/FFmpeg-Builds)
+#         to e.g. C:\Users\<you>\audioscratch-winbuild\ffmpeg
+```
+
+From an MSVC x64 dev shell (after `vcvars64.bat`):
+
+```bat
+set "FFMPEG_DIR=C:\Users\<you>\audioscratch-winbuild\ffmpeg"
+cmake -S . -B build-win -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_PREFIX_PATH=C:/Qt/6.8.3/msvc2022_64
+cmake --build build-win
+build-win\audioscratch.exe --selftest            & rem decode / scrub / zero-alloc
+build-win\audioscratch.exe --selftest-controls   & rem pitch / loop / seek / mode
+```
+
+FFmpeg is located via `FFMPEG_DIR` (or `-DFFMPEG_ROOT=<sdk>`). For the full
+reproducible recipe — prerequisites, the MSVC portability notes, and packaging a
+self-contained `.zip` / installer via `packaging\windows\deploy.ps1` — see
+[`packaging/windows/README.md`](packaging/windows/README.md).
 
 ## License
 

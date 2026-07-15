@@ -7,9 +7,13 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <new>
 #include <string>
 #include <vector>
+#ifdef _MSC_VER
+#include <malloc.h>   // _aligned_malloc / _aligned_free (no posix_memalign on MSVC)
+#endif
 
 #include "engine/audio/BungeeStretcher.h"
 #include "engine/audio/IStretcher.h"
@@ -28,6 +32,21 @@
 // __real_malloc so it is counted exactly once. Everything forwards to the real
 // allocator, so behaviour is otherwise identical to the defaults.
 // ---------------------------------------------------------------------------
+// Counter state, shared by both allocator-guard implementations below.
+namespace {
+std::atomic<bool> g_rtGuard{false};
+std::atomic<long> g_rtAllocs{0};
+inline void countAlloc() {
+    if (g_rtGuard.load(std::memory_order_relaxed))
+        g_rtAllocs.fetch_add(1, std::memory_order_relaxed);
+}
+}
+
+#ifdef __GNUC__
+// --- GCC/Clang: full C-allocator interception via the linker's --wrap (see CMakeLists),
+// so allocations that bypass operator new — Eigen/Bungee's direct malloc/posix_memalign —
+// are counted too, then route operator new through __real_malloc so each C++ allocation is
+// counted exactly once. Everything forwards to the real allocator (behaviour unchanged).
 extern "C" {
 void* __real_malloc(std::size_t);
 void  __real_free(void*);
@@ -38,12 +57,6 @@ void* __real_aligned_alloc(std::size_t, std::size_t);
 }
 
 namespace {
-std::atomic<bool> g_rtGuard{false};
-std::atomic<long> g_rtAllocs{0};
-inline void countAlloc() {
-    if (g_rtGuard.load(std::memory_order_relaxed))
-        g_rtAllocs.fetch_add(1, std::memory_order_relaxed);
-}
 inline void* allocAligned(std::size_t n, std::size_t align) {
     if (align < sizeof(void*)) align = sizeof(void*);
     void* p = nullptr;
@@ -73,6 +86,26 @@ void operator delete(void* p, std::align_val_t) noexcept { __real_free(p); }
 void operator delete[](void* p, std::align_val_t) noexcept { __real_free(p); }
 void operator delete(void* p, std::size_t, std::align_val_t) noexcept { __real_free(p); }
 void operator delete[](void* p, std::size_t, std::align_val_t) noexcept { __real_free(p); }
+
+#else
+// --- MSVC (no linker --wrap): raw malloc/posix_memalign from Eigen/Bungee cannot be
+// intercepted, so the guard here counts C++ operator-new allocations only — still a valid
+// proof that the RT render path performs no `new` (the stronger direct-malloc proof is kept
+// on the GCC/Clang build). Over-aligned allocations must use _aligned_malloc/_aligned_free:
+// MSVC's CRT has no posix_memalign and cannot release an _aligned_malloc block via plain free.
+void* operator new(std::size_t n) { countAlloc(); void* p = std::malloc(n ? n : 1); if (!p) throw std::bad_alloc(); return p; }
+void* operator new[](std::size_t n) { countAlloc(); void* p = std::malloc(n ? n : 1); if (!p) throw std::bad_alloc(); return p; }
+void* operator new(std::size_t n, std::align_val_t a) { countAlloc(); void* p = _aligned_malloc(n ? n : 1, static_cast<std::size_t>(a)); if (!p) throw std::bad_alloc(); return p; }
+void* operator new[](std::size_t n, std::align_val_t a) { countAlloc(); void* p = _aligned_malloc(n ? n : 1, static_cast<std::size_t>(a)); if (!p) throw std::bad_alloc(); return p; }
+void operator delete(void* p) noexcept { std::free(p); }
+void operator delete[](void* p) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
+void operator delete(void* p, std::align_val_t) noexcept { _aligned_free(p); }
+void operator delete[](void* p, std::align_val_t) noexcept { _aligned_free(p); }
+void operator delete(void* p, std::size_t, std::align_val_t) noexcept { _aligned_free(p); }
+void operator delete[](void* p, std::size_t, std::align_val_t) noexcept { _aligned_free(p); }
+#endif
 
 namespace as {
 namespace {
@@ -147,7 +180,12 @@ void analyse(const std::vector<float>& interleaved, int ch, double& maxStep, dou
 // --- Check 1: decode a known WAV to project-rate stereo f32 --------------------
 void testDecode() {
     std::printf("\nDecode correctness (exit criterion 3)\n");
-    const char* wav = "/tmp/audioscratch_selftest.wav";
+    // OS-appropriate temp dir (%TEMP% on Windows, /tmp on POSIX) — no hardcoded /tmp.
+    std::error_code tmpEc;
+    std::filesystem::path tmpDir = std::filesystem::temp_directory_path(tmpEc);
+    if (tmpEc) tmpDir = std::filesystem::current_path();
+    const std::string wavPath = (tmpDir / "audioscratch_selftest.wav").string();
+    const char* wav = wavPath.c_str();
     if (!writeSineWav(wav, 440.0, 2.0)) { check(false, "write test wav"); return; }
 
     MediaDecoder media;

@@ -49,6 +49,18 @@ with the earlier direct push.)
       and a **working** Linux AppImage around it; verified it runs (previous quick
       AppImage crashed the loader — root cause + fix documented below).
 - [x] Committed the reproducible packaging recipe under `packaging/linux/`.
+- [x] **Windows v0.1.0 build — DONE and verified natively on the Windows PC.** Built
+      with **MSVC 2022 + Qt 6.8.3** (installed via `aqtinstall`, no Qt account) +
+      **BtbN LGPL-shared FFmpeg** (R16-clean, no `--enable-gpl`). Bungee (MPL-2.0)
+      compiles + links cleanly under MSVC — **the Signalsmith fallback was NOT needed**;
+      the stretcher is Bungee, same as Linux. Both `--selftest` and
+      `--selftest-controls` print `ALL PASS`; the GUI launches (UTF-8 glyphs render via
+      `/utf-8`). Packaged with `packaging/windows/deploy.ps1` into
+      `dist\AudioScratch-v0.1.0-win64.zip` (self-contained — verified by running from a
+      clean folder with `PATH` = just `C:\Windows`). Reproducible recipe committed under
+      `packaging/windows/` (`deploy.ps1` + `README.md` + `audioscratch.iss`). Dependency
+      tools live OUTSIDE the repo: Qt at `C:\Qt\6.8.3\msvc2022_64`, FFmpeg at
+      `C:\Users\maxi\audioscratch-winbuild\ffmpeg`.
 
 ### Remaining
 - [ ] **Publish the v0.1.0 GitHub Release** (see "Exact next step").
@@ -56,10 +68,9 @@ with the earlier direct push.)
       engine behaviour is proven by the headless tests). Launch: `./build/audioscratch`.
 
 ### Blocked
-- [ ] **Windows v0.1.0 build** — Blocker: no cross-toolchain on this Linux box; must
-      come from a GitHub Actions `windows-latest` runner, and it's unproven porting work
-      (FFmpeg/CMake rework + the flagged Bungee-MSVC risk). User chose **Linux-only** for
-      v0.1.0. Separate follow-up.
+- (none) — the former "Windows v0.1.0 build" blocker is resolved: it was built and
+  verified **natively** on the Windows PC (no cross-toolchain / CI runner needed). See
+  "Done this session". The Bungee-MSVC risk did not materialize — it compiled cleanly.
 
 ## Decisions made
 

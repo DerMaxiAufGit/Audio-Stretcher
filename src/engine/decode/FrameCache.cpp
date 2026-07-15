@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>   // std::llabs (not guaranteed transitively via <algorithm> on MSVC's STL)
 #include <utility>
 
 namespace as {

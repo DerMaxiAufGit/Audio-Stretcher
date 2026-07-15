@@ -32,9 +32,11 @@ ui_*.h
 *.AppDir/
 *.flatpak
 /packaging/**/dist/
+/dist/
 
 # ---- Third-party fetched binaries/builds ----
 /third_party/**/build/
+aqtinstall.log
 
 # ---- IDE / editor ----
 .vscode/
