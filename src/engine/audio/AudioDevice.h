@@ -27,12 +27,18 @@ public:
     int  sampleRate() const { return sampleRate_; }
     int  bufferFrames() const { return bufferFrames_; }
 
+    // Total output-buffer latency in device frames (period size * period count):
+    // audio handed to the callback plays this many frames AFTER it is generated, so
+    // the UI subtracts it to place the visual playhead on the sample being heard.
+    int  latencyFrames() const { return latencyFrames_; }
+
 private:
     struct Impl;
     std::unique_ptr<Impl> d_;
     bool running_ = false;
     int  sampleRate_ = kProjectSampleRate;
     int  bufferFrames_ = 256;
+    int  latencyFrames_ = 0;
 };
 
 } // namespace as

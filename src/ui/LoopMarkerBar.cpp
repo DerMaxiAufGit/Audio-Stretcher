@@ -157,8 +157,9 @@ void LoopMarkerBar::paintEvent(QPaintEvent*) {
             p.drawText(QPointF(mx + 8, sBot - 3), m.label);
     }
 
-    // Playhead (context; the waveform is the primary indicator).
-    const double px = xAtFrame(deck_->currentFrame());
+    // Playhead (context; the waveform is the primary indicator). Uses the HEARD
+    // position (latency-compensated) so it lines up with the waveform playhead (#3).
+    const double px = waveform_->xAtFrame(deck_->heardSeconds() * deck_->sampleRate());
     if (px >= 0 && px <= w) {
         p.setPen(QPen(QColor(255, 96, 96), 1));
         p.drawLine(QPointF(px, sTop), QPointF(px, sBot));

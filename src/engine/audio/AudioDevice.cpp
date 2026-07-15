@@ -55,6 +55,12 @@ bool AudioDevice::start(ScrubEngine* engine, StretcherKind kind,
     bufferFrames_ = static_cast<int>(d_->device.playback.internalPeriodSizeInFrames);
     if (bufferFrames_ <= 0) bufferFrames_ = bufferFrames;
 
+    // Full device output buffer = period size * period count (miniaudio's own
+    // convention). This is the frames queued ahead of the DAC, i.e. the delay
+    // between generating a sample and hearing it. Used for playhead sync.
+    const int periods = static_cast<int>(d_->device.playback.internalPeriods);
+    latencyFrames_ = bufferFrames_ * (periods > 0 ? periods : 1);
+
     // Prepare the engine now that the actual device rate/period are known.
     engine->prepare(sampleRate_, bufferFrames_, kind);
 

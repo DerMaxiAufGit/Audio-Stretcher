@@ -41,8 +41,25 @@ int Deck::sampleRate() const {
     return current_ && !current_->empty() ? current_->sampleRate() : kProjectSampleRate;
 }
 
+double Deck::outputLatencySeconds() const {
+    const int lat = device_.latencyFrames();
+    const int rate = device_.sampleRate();
+    return (lat > 0 && rate > 0) ? static_cast<double>(lat) / rate : 0.0;
+}
+
+double Deck::heardSeconds() const {
+    const double pub = publishedSeconds();
+    // Only compensate during auto-play: while scrubbing the user drives the
+    // position directly, and while paused no audio is draining — in both cases the
+    // published position already IS the audible one.
+    if (!playing() || scrubbing()) return pub;
+    return std::max(0.0, pub - outputLatencySeconds());
+}
+
 frame_t Deck::currentFrame() const {
-    return static_cast<frame_t>(std::llround(publishedSeconds() * sampleRate()));
+    // Heard (latency-compensated) position so "drop marker / set A-B at playhead"
+    // land where the visible red playhead is, not a buffer ahead of it (#3).
+    return static_cast<frame_t>(std::llround(heardSeconds() * sampleRate()));
 }
 
 frame_t Deck::durationFrames() const {

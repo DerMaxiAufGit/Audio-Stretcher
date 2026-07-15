@@ -41,6 +41,16 @@ public:
     double publishedSeconds() const { return engine_.publishedSeconds(); }
     double durationSeconds() const  { return engine_.durationSeconds(); }
 
+    // Output-buffer latency (seconds): the delay between the engine generating a
+    // sample and the DAC playing it. 0 until the device is running.
+    double outputLatencySeconds() const;
+    // The playhead position actually being HEARD right now: publishedSeconds()
+    // minus the output latency while auto-playing (paused/scrubbing have no
+    // generate-vs-hear gap, so they return the raw position). The waveform cursor
+    // uses this so the red line sits on the audio you hear, not the audio just
+    // generated a buffer ahead. See issue #3 (timeline out of sync).
+    double heardSeconds() const;
+
     // --- Phase 2 performance controls: update the model AND the engine control
     //     block. The UI calls these; it never touches the audio thread directly. ---
     void setPitchRatio(float ratio)  { engine_.setPitchRatio(ratio); }

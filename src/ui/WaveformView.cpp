@@ -62,7 +62,7 @@ void WaveformView::fitAll() {
 void WaveformView::followPlayhead() {
     const DecodedAudio* a = deck_ ? deck_->audio() : nullptr;
     if (!a || a->empty()) return;
-    const double pf = deck_->publishedSeconds() * a->sampleRate();
+    const double pf = deck_->heardSeconds() * a->sampleRate();
     const double x = xAtFrame(pf);
     if (x < 0 || x > width()) {             // recentre when off-screen
         scrollOffsetFrames_ = pf - width() * samplesPerPixel_ * 0.5;
@@ -130,12 +130,15 @@ void WaveformView::paintEvent(QPaintEvent*) {
         p.drawLine(x, y0, x, y1);
     }
 
-    // Playhead.
-    const double pf = deck_->publishedSeconds() * a->sampleRate();
+    // Playhead — drawn at the position being HEARD (publishedSeconds compensated
+    // for output-buffer latency), so the red line tracks the audio you hear rather
+    // than the audio generated a buffer ahead of the DAC (issue #3).
+    const double pf = deck_->heardSeconds() * a->sampleRate();
     const double px = xAtFrame(pf);
     if (px >= 0 && px <= w) {
         p.setPen(QPen(QColor(255, 96, 96), 2));
-        p.drawLine(static_cast<int>(px), 0, static_cast<int>(px), h);
+        const int pxi = static_cast<int>(std::lround(px));
+        p.drawLine(pxi, 0, pxi, h);
     }
 }
 
