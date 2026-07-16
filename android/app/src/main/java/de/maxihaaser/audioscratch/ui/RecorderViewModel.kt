@@ -9,6 +9,7 @@ import de.maxihaaser.audioscratch.audio.AudioImporter
 import de.maxihaaser.audioscratch.audio.AudioRecorder
 import de.maxihaaser.audioscratch.audio.ScrubPlayer
 import de.maxihaaser.audioscratch.audio.WavIo
+import de.maxihaaser.audioscratch.audio.WaveformPeaks
 import de.maxihaaser.audioscratch.service.ClipEvents
 import de.maxihaaser.audioscratch.service.InstantReplayService
 import de.maxihaaser.audioscratch.service.InstantReplayState
@@ -16,6 +17,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -24,6 +26,7 @@ import java.io.IOException
 import kotlin.concurrent.thread
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.math.pow
+import kotlin.math.roundToLong
 
 /** High-level state driving [RecordScrubScreen]. */
 sealed interface UiState {
@@ -36,10 +39,34 @@ sealed interface UiState {
     /** A recording is loaded and ready to scrub / play. */
     class Ready(
         val file: File?,
-        val peaks: FloatArray,
+        /** Min/max envelope index over [samples], for drawing the waveform. */
+        val peaks: WaveformPeaks,
+        /**
+         * The loaded PCM — the same array the player renders from. Held so the
+         * waveform can scan it directly when zoomed in past [WaveformPeaks.bucketFrames].
+         * Never mutated after load.
+         */
+        val samples: ShortArray,
         val sampleRate: Int,
     ) : UiState
 }
+
+/**
+ * The half-open frame range `[startFrame, startFrame + frames)` of the clip that
+ * the waveform shows.
+ *
+ * The two fields are one immutable value rather than two [StateFlow]s because the
+ * window is written from both the main thread (gestures, buttons, sliders) and the
+ * player's worker thread (playhead follow). Split state could publish a
+ * `startFrame` computed against a `frames` another thread had already replaced,
+ * breaking the invariants below and visibly sliding the ruler off the waveform.
+ *
+ * Invariants, re-established by every mutator (see [RecorderViewModel.clampWindow]):
+ * `frames` in `minVisibleFrames..totalFrames` and `startFrame` in
+ * `0..(totalFrames - frames)`. "Zoomed out" / fit is `frames == totalFrames`.
+ * Nothing loaded is `ViewWindow(0, 0)`.
+ */
+data class ViewWindow(val startFrame: Int, val frames: Int)
 
 /**
  * Owns the record → scrub flow: wires [AudioRecorder] and [ScrubPlayer] together
@@ -105,6 +132,23 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
     private val _durationSeconds = MutableStateFlow(0f)
     val durationSeconds: StateFlow<Float> = _durationSeconds.asStateFlow()
 
+    // --- waveform view window ---
+    // The waveform shows a window of the clip rather than the whole thing. See
+    // [ViewWindow] for the range it describes and the invariants every mutator
+    // here upholds.
+
+    /** Frame count of the loaded audio (0 when nothing is loaded). */
+    private val _totalFrames = MutableStateFlow(0)
+    val totalFrames: StateFlow<Int> = _totalFrames.asStateFlow()
+
+    /**
+     * The waveform's visible window — the single source of truth for both of its
+     * bounds. Only ever written through [_viewWindow].update, so a reader always
+     * sees a start/frames pair that was computed together.
+     */
+    private val _viewWindow = MutableStateFlow(ViewWindow(0, 0))
+    val viewWindow: StateFlow<ViewWindow> = _viewWindow.asStateFlow()
+
     /** Whether the hosting Activity is in the foreground (set by MainActivity). */
     private var isForeground = false
 
@@ -112,7 +156,12 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
     private var loadedSourcePath: String? = null
 
     init {
-        player.onPlayhead = { pos -> _playhead.value = pos }
+        // Called on the player's worker thread. StateFlow writes are thread-safe,
+        // so both the playhead and the view-window follow are safe to do here.
+        player.onPlayhead = { pos ->
+            _playhead.value = pos
+            followPlayhead(pos)
+        }
         player.onCompletion = { _isPlaying.value = false }
 
         // Reconcile the Instant Replay switch with the service's real capture state
@@ -258,6 +307,129 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
         player.scrub(norm)
         _playhead.value = norm.coerceIn(0f, 1f)
     }
+
+    /**
+     * Scrub to [viewNorm], a `0..1` position *within the visible waveform window*.
+     * The waveform only shows [viewWindow], so its x axis is not the whole clip
+     * once zoomed in; [scrub] still takes a whole-clip norm and backs the position
+     * slider.
+     */
+    fun scrubAtViewNorm(viewNorm: Float) {
+        scrub(viewNormToClipNorm(viewNorm))
+    }
+
+    /** Map a `0..1` position inside the visible window to a whole-clip norm. */
+    private fun viewNormToClipNorm(viewNorm: Float): Float {
+        val total = _totalFrames.value
+        if (total <= 0) return 0f
+        // Double throughout: Float is only exact to ~16.7M, i.e. ~379 s at 44.1 kHz,
+        // so a long clip would snap the scrub target to the wrong frame near its tail.
+        val w = _viewWindow.value
+        val frame = w.startFrame + viewNorm.coerceIn(0f, 1f).toDouble() * w.frames
+        return (frame / total).coerceIn(0.0, 1.0).toFloat()
+    }
+
+    /**
+     * Re-establish the [ViewWindow] invariants for a candidate [startFrame] /
+     * [frames] pair against [total]. Both bounds are decided here, together, from
+     * one read of the total — the only way the window is ever built.
+     *
+     * Takes [Long]s because callers add unclamped frame deltas: an [Int] `start +
+     * delta` can overflow and wrap negative, which would clamp a pan towards the
+     * end of a long clip back to its start.
+     */
+    private fun clampWindow(startFrame: Long, frames: Long, total: Int): ViewWindow {
+        if (total <= 0) return ViewWindow(0, 0) // nothing loaded — no window to clamp into
+        val f = frames.coerceIn(minVisibleFrames(total).toLong(), total.toLong())
+        val s = startFrame.coerceIn(0L, total - f)
+        return ViewWindow(s.toInt(), f.toInt())
+    }
+
+    /**
+     * Zoom by [zoomFactor] about [centerNorm] and then pan by [panFraction], as one
+     * atomic move. Both are applied to the same window snapshot, so a pinch and a
+     * drag arriving in the same event agree on how wide the view is.
+     *
+     * [zoomFactor] > 1 zooms in, < 1 zooms out; [centerNorm] is a `0..1` position in
+     * the *current* view that stays anchored under the finger; [panFraction] is a
+     * fraction of the *post-zoom* view width (so the UI never does frame math and
+     * can't pass a stale width). Zoom-in stops at [MIN_VISIBLE_FRAMES], zoom-out at
+     * the whole clip.
+     */
+    fun transformView(zoomFactor: Float, panFraction: Float, centerNorm: Float) {
+        val total = _totalFrames.value
+        if (total <= 0) return
+        _viewWindow.update { w ->
+            val visible = if (w.frames > 0) w.frames else total
+            val zoom = if (zoomFactor > 0f && zoomFactor.isFinite()) zoomFactor else 1f
+            val anchor = centerNorm.coerceIn(0f, 1f).toDouble()
+            // Frame under the anchor, which must not move across the zoom.
+            val anchorFrame = w.startFrame + anchor * visible
+            val zoomed = (visible / zoom.toDouble())
+                .roundToLong()
+                .coerceIn(minVisibleFrames(total).toLong(), total.toLong())
+            val pan = if (panFraction.isFinite()) panFraction.toDouble() else 0.0
+            // Pan against the post-zoom width, not the width we started the event with.
+            val start = anchorFrame - anchor * zoomed + pan * zoomed
+            clampWindow(start.roundToLong(), zoomed, total)
+        }
+    }
+
+    /**
+     * Zoom about [centerNorm] without panning — the zoom buttons' entry point.
+     * Desktop parity: one button step is 1.3×.
+     */
+    fun zoomBy(factor: Float, centerNorm: Float) {
+        transformView(zoomFactor = factor, panFraction = 0f, centerNorm = centerNorm)
+    }
+
+    /** Show the whole clip (desktop's "zoom to fit"). */
+    fun zoomToFit() {
+        val total = _totalFrames.value
+        _viewWindow.update { clampWindow(0L, total.toLong(), total) }
+    }
+
+    /** Scroll the view window by [delta] frames (negative pans towards the start). */
+    fun panByFrames(delta: Int) {
+        val total = _totalFrames.value
+        _viewWindow.update { w -> clampWindow(w.startFrame.toLong() + delta, w.frames.toLong(), total) }
+    }
+
+    /** Move the view window so it starts at frame [f], clamped to the clip. */
+    fun setViewStartFrame(f: Int) {
+        val total = _totalFrames.value
+        _viewWindow.update { w -> clampWindow(f.toLong(), w.frames.toLong(), total) }
+    }
+
+    /**
+     * Recentre the view on the playhead when it leaves the visible window, so
+     * auto-play doesn't run off the edge of a zoomed-in waveform.
+     *
+     * Called from the player's worker thread on every rendered chunk, concurrently
+     * with the main thread's gestures — hence the read-modify-write of the whole
+     * window in one [MutableStateFlow.update] rather than a read of one bound and a
+     * write of the other. Skipped while fully zoomed out (nothing to follow) and
+     * while the user is steering: [scrub] clears [isPlaying], which is the same
+     * guard the desktop spells as `playing() && !scrubbing()`.
+     */
+    private fun followPlayhead(norm: Float) {
+        if (!_isPlaying.value) return
+        val total = _totalFrames.value
+        if (total <= 0) return
+        val frame = (norm.coerceIn(0f, 1f).toDouble() * total).toLong()
+        _viewWindow.update { w ->
+            if (w.frames <= 0 || w.frames >= total) return@update w
+            if (frame >= w.startFrame && frame < w.startFrame + w.frames) return@update w
+            clampWindow(frame - w.frames / 2, w.frames.toLong(), total)
+        }
+    }
+
+    /**
+     * Smallest allowed view window. Stands in for the desktop's "1 sample per
+     * pixel" zoom limit — the ViewModel doesn't know the waveform's pixel width,
+     * and past this point the columns are sample-and-held anyway.
+     */
+    private fun minVisibleFrames(total: Int): Int = minOf(MIN_VISIBLE_FRAMES, total)
 
     /** Set the playback speed (base rate), clamped to 0.25×..4×. */
     fun setSpeed(rate: Float) {
@@ -439,26 +611,43 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
 
     /**
      * Load canonical mono [SAMPLE_RATE]Hz 16-bit PCM [samples] into the player,
-     * reset the playhead, compute the waveform peaks, move to [UiState.Ready] and
-     * start playing. Shared by [stopRecording], [importFromUri] and [loadClipFile];
-     * [sourceFile] is the on-disk WAV backing a recording, or `null` for an
-     * in-memory import.
+     * reset the playhead, build the waveform peak index, move to [UiState.Ready]
+     * and start playing. Shared by [stopRecording], [importFromUri] and
+     * [loadClipFile]; [sourceFile] is the on-disk WAV backing a recording, or
+     * `null` for an in-memory import.
+     *
+     * Suspends: the peak index is one pass over the whole clip and [ScrubPlayer.load]
+     * blocks, so both run on a background dispatcher before anything is published to
+     * the UI. Every state write below stays on the caller's (main) thread, and
+     * [UiState.Ready] is only published once the player really holds the audio.
      *
      * Only ever called for a *completed* load, so the auto-play here can never fire
      * while a recording is in progress.
      */
-    private fun loadSamplesIntoPlayer(samples: ShortArray, sourceFile: File?) {
+    private suspend fun loadSamplesIntoPlayer(samples: ShortArray, sourceFile: File?) {
+        // Minutes of audio would jank the frame this runs on; keep it off the main thread.
+        val peaks = withContext(Dispatchers.Default) { WaveformPeaks(samples) }
         loadedSourcePath = sourceFile?.absolutePath
-        player.load(samples, SAMPLE_RATE)
-        // load() rebuilt the AudioTrack; re-apply the current transport + gain so
-        // the freshly loaded clip inherits the user's settings.
-        applyPlaybackParams()
-        applyGain()
+        // load() tears the old player down first, joining a render thread that may be
+        // parked in a blocking AudioTrack.write() — tens of ms the main thread must
+        // not spend. The re-applies ride along so they still land on the fresh track
+        // before the UI can reach it.
+        withContext(Dispatchers.IO) {
+            player.load(samples, SAMPLE_RATE)
+            // load() rebuilt the AudioTrack; re-apply the current transport + gain so
+            // the freshly loaded clip inherits the user's settings.
+            applyPlaybackParams()
+            applyGain()
+        }
         _playhead.value = 0f
         _durationSeconds.value = samples.size.toFloat() / SAMPLE_RATE
+        // A fresh clip starts zoomed to fit.
+        _totalFrames.value = samples.size
+        _viewWindow.value = clampWindow(0L, samples.size.toLong(), samples.size)
         _uiState.value = UiState.Ready(
             file = sourceFile,
-            peaks = WavIo.computePeaks(samples, WAVEFORM_BUCKETS),
+            peaks = peaks,
+            samples = samples,
             sampleRate = SAMPLE_RATE,
         )
         // Desktop parity: auto-play as soon as a recording / import / clip loads.
@@ -475,7 +664,9 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
     private companion object {
         const val SAMPLE_RATE = 44_100
         const val RECORDING_NAME = "recording.wav"
-        const val WAVEFORM_BUCKETS = 512
+
+        /** Tightest waveform zoom, in frames across the whole view. */
+        const val MIN_VISIBLE_FRAMES = 64
         const val MIN_SPEED = 0.25f
         const val MAX_SPEED = 4f
         const val MAX_SEMITONES = 36

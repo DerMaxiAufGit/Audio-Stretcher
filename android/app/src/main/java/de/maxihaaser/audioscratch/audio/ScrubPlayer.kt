@@ -76,7 +76,14 @@ class ScrubPlayer {
      * Load PCM into the player, replacing any previous data and resetting the
      * playhead to the start. Builds a fresh [AudioTrack] and starts the render
      * thread (which idles silently until [play] or [scrub] is called).
+     *
+     * Mutually exclusive with [release]: loading runs off the main thread, so a
+     * teardown from `onCleared` can land mid-load. Serialising the two stops the
+     * fresh track from being built behind a release that has already run (which
+     * would leak an [AudioTrack]). The lock is reentrant, so the [release] call
+     * below is fine.
      */
+    @Synchronized
     fun load(pcm: ShortArray, sampleRate: Int) {
         release()
         this.samples = pcm
@@ -217,7 +224,12 @@ class ScrubPlayer {
         }
     }
 
-    /** Stop rendering and release the underlying [AudioTrack]. Reusable via [load]. */
+    /**
+     * Stop rendering and release the underlying [AudioTrack]. Reusable via [load].
+     * Serialised against [load] so a teardown can't interleave with a load that is
+     * building a new track on another thread.
+     */
+    @Synchronized
     fun release() {
         val toJoin: Thread?
         synchronized(lock) {

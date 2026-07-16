@@ -6,7 +6,6 @@ import java.io.FileOutputStream
 import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import kotlin.math.abs
 
 /**
  * Minimal reader/writer for canonical RIFF/WAVE files containing 16-bit signed
@@ -129,32 +128,6 @@ object WavIo {
             samples[i] = sb.short
         }
         return WavData(samples, sampleRate, channels.coerceAtLeast(1))
-    }
-
-    /**
-     * Reduce [samples] to at most [targetBuckets] peak magnitudes in `[0f, 1f]`,
-     * one per contiguous slice — the maximum absolute amplitude in that slice.
-     * Handy for drawing a waveform. Returns an empty array for empty input.
-     */
-    fun computePeaks(samples: ShortArray, targetBuckets: Int): FloatArray {
-        if (samples.isEmpty() || targetBuckets <= 0) return FloatArray(0)
-        val buckets = minOf(targetBuckets, samples.size)
-        val peaks = FloatArray(buckets)
-        val perBucket = samples.size.toDouble() / buckets
-        for (b in 0 until buckets) {
-            val start = (b * perBucket).toInt()
-            val end = minOf(((b + 1) * perBucket).toInt(), samples.size)
-            var peak = 0
-            var i = start
-            while (i < end) {
-                val a = abs(samples[i].toInt())
-                if (a > peak) peak = a
-                i++
-            }
-            // 32768 == abs(Short.MIN_VALUE); keeps the result within [0f, 1f].
-            peaks[b] = (peak / 32768f).coerceIn(0f, 1f)
-        }
-        return peaks
     }
 
     private fun buildHeader(sampleRate: Int, channels: Int, dataBytes: Long): ByteArray {

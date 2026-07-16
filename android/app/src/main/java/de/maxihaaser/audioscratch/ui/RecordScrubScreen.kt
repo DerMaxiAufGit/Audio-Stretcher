@@ -8,8 +8,11 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateCentroid
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,6 +23,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -40,6 +44,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -49,6 +54,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -57,6 +63,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import de.maxihaaser.audioscratch.R
 import de.maxihaaser.audioscratch.audio.ScrubPlayer
+import de.maxihaaser.audioscratch.audio.WaveformPeaks
+import kotlin.math.abs
 import kotlin.math.ln
 import kotlin.math.pow
 import kotlin.math.roundToInt
@@ -91,6 +99,8 @@ fun RecordScrubScreen(
     val volumePercent by viewModel.volumePercent.collectAsState()
     val muted by viewModel.muted.collectAsState()
     val durationSeconds by viewModel.durationSeconds.collectAsState()
+    val totalFrames by viewModel.totalFrames.collectAsState()
+    val viewWindow by viewModel.viewWindow.collectAsState()
 
     Column(
         modifier = modifier
@@ -139,7 +149,14 @@ fun RecordScrubScreen(
                         volumePercent = volumePercent,
                         muted = muted,
                         durationSeconds = durationSeconds,
+                        totalFrames = totalFrames,
+                        viewWindow = viewWindow,
                         onScrub = viewModel::scrub,
+                        onScrubAtViewNorm = viewModel::scrubAtViewNorm,
+                        onZoomBy = viewModel::zoomBy,
+                        onZoomToFit = viewModel::zoomToFit,
+                        onTransformView = viewModel::transformView,
+                        onSetViewStartFrame = viewModel::setViewStartFrame,
                         onTogglePlay = viewModel::togglePlayback,
                         onSetSpeed = viewModel::setSpeed,
                         onResetSpeed = viewModel::resetSpeed,
@@ -373,7 +390,14 @@ private fun ReadyContent(
     volumePercent: Int,
     muted: Boolean,
     durationSeconds: Float,
+    totalFrames: Int,
+    viewWindow: ViewWindow,
     onScrub: (Float) -> Unit,
+    onScrubAtViewNorm: (Float) -> Unit,
+    onZoomBy: (Float, Float) -> Unit,
+    onZoomToFit: () -> Unit,
+    onTransformView: (Float, Float, Float) -> Unit,
+    onSetViewStartFrame: (Int) -> Unit,
     onTogglePlay: () -> Unit,
     onSetSpeed: (Float) -> Unit,
     onResetSpeed: () -> Unit,
@@ -384,6 +408,11 @@ private fun ReadyContent(
     onSetVolumePercent: (Int) -> Unit,
     onSetMuted: (Boolean) -> Unit,
 ) {
+    // The ViewModel holds the window as one value; unpack it here for the widgets
+    // that only care about a single bound.
+    val viewStartFrame = viewWindow.startFrame
+    val viewFrames = viewWindow.frames
+
     // The transport + DSP controls make this taller than the viewport on small
     // screens, so the whole Ready pane scrolls.
     Column(
@@ -392,22 +421,57 @@ private fun ReadyContent(
             .verticalScroll(rememberScrollState()),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
+        // The ruler spans exactly the waveform's window, so both must be laid out
+        // to the same width. Seconds are Double: Float would drift the ticks off
+        // the waveform on a clip longer than ~379 s.
+        TimeRuler(
+            startSeconds = viewStartFrame.toDouble() / state.sampleRate,
+            visibleSeconds = viewFrames.toDouble() / state.sampleRate,
+            modifier = Modifier.fillMaxWidth(),
+        )
+
         Waveform(
             peaks = state.peaks,
+            samples = state.samples,
+            totalFrames = totalFrames,
+            viewStartFrame = viewStartFrame,
+            viewFrames = viewFrames,
             progress = playhead,
             waveColor = MaterialTheme.colorScheme.primary,
             playedColor = MaterialTheme.colorScheme.tertiary,
             backgroundColor = MaterialTheme.colorScheme.surfaceVariant,
-            onScrub = onScrub,
+            onScrubAtViewNorm = onScrubAtViewNorm,
+            onTransformView = onTransformView,
             modifier = Modifier
                 .fillMaxWidth()
                 .height(160.dp),
         )
 
-        Spacer(Modifier.height(16.dp))
+        ZoomControls(
+            onZoomOut = { onZoomBy(1f / ZoomStep, 0.5f) },
+            onZoomToFit = onZoomToFit,
+            onZoomIn = { onZoomBy(ZoomStep, 0.5f) },
+        )
 
-        Slider(
+        // Only reachable once zoomed in — at fit there is nothing to pan.
+        val maxViewStart = (totalFrames - viewFrames).coerceAtLeast(0)
+        if (maxViewStart > 0) {
+            LabelledSlider(
+                label = stringResource(R.string.pan_label),
+                value = viewStartFrame.toFloat().coerceIn(0f, maxViewStart.toFloat()),
+                valueRange = 0f..maxViewStart.toFloat(),
+                onValueChange = { onSetViewStartFrame(it.roundToInt()) },
+            )
+        }
+
+        Spacer(Modifier.height(8.dp))
+
+        // Distinct from the pan slider above: this one spans the whole clip and
+        // seeks, rather than moving the waveform's window.
+        LabelledSlider(
+            label = stringResource(R.string.position_label),
             value = playhead.coerceIn(0f, 1f),
+            valueRange = 0f..1f,
             onValueChange = onScrub,
         )
 
@@ -615,58 +679,229 @@ private fun VolumeControls(
     }
 }
 
+/**
+ * Min/max envelope of the clip's *visible* window — one column per pixel, drawn
+ * from [peaks] (or straight from [samples] when zoomed in past a bucket).
+ *
+ * [progress] is a whole-clip norm and is re-projected onto the window, as is the
+ * played/unplayed split. Scrub positions travel the other way, as window-relative
+ * norms via [onScrubAtViewNorm].
+ */
 @Composable
 private fun Waveform(
-    peaks: FloatArray,
+    peaks: WaveformPeaks,
+    samples: ShortArray,
+    totalFrames: Int,
+    viewStartFrame: Int,
+    viewFrames: Int,
     progress: Float,
     waveColor: Color,
     playedColor: Color,
     backgroundColor: Color,
-    onScrub: (Float) -> Unit,
+    onScrubAtViewNorm: (Float) -> Unit,
+    onTransformView: (Float, Float, Float) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val columns = remember { WaveformColumns() }
+    val description = stringResource(R.string.waveform_desc)
+
     Canvas(
         modifier = modifier
             .clip(RoundedCornerShape(12.dp))
             .background(backgroundColor)
-            .semantics { contentDescription = "Waveform. Drag to scrub." }
+            .semantics { contentDescription = description }
             .pointerInput(peaks) {
-                detectHorizontalDragGestures(
-                    onDragStart = { offset ->
-                        onScrub((offset.x / size.width).coerceIn(0f, 1f))
-                    },
-                ) { change, _ ->
-                    onScrub((change.position.x / size.width).coerceIn(0f, 1f))
-                }
-            }
-            .pointerInput(peaks) {
-                detectTapGestures { offset ->
-                    onScrub((offset.x / size.width).coerceIn(0f, 1f))
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    val width = size.width.toFloat()
+                    if (width <= 0f) return@awaitEachGesture
+                    val slop = viewConfiguration.touchSlop
+
+                    // One pointer scrubs, two transform. The two are decided here
+                    // rather than by stacking gesture detectors, which would race:
+                    // whichever claimed the pointer first would swallow the other.
+                    var transforming = false // a 2nd finger landed → pinch/pan
+                    var scrubbing = false    // 1 finger, horizontal intent confirmed
+                    var abandoned = false    // vertical intent → let the pane scroll
+                    var dragged = false      // moved at all → not a tap
+
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val pressed = event.changes.filter { it.pressed }
+                        if (pressed.isEmpty()) break
+                        // Latch: once it's a pinch it stays one until every finger
+                        // lifts. Falling back to scrub as a finger leaves would
+                        // snap the playhead to the surviving finger.
+                        if (pressed.size >= 2 && !abandoned) transforming = true
+
+                        if (transforming) {
+                            dragged = true
+                            if (pressed.size >= 2) {
+                                val centroid = event.calculateCentroid()
+                                val zoom = event.calculateZoom()
+                                val zoomFactor = if (zoom > 0f && zoom.isFinite()) zoom else 1f
+                                val panX = event.calculatePan().x
+                                if (zoomFactor != 1f || panX != 0f) {
+                                    val center = if (centroid == Offset.Unspecified) {
+                                        0.5f
+                                    } else {
+                                        (centroid.x / width).coerceIn(0f, 1f)
+                                    }
+                                    // Zoom and pan go over together as fractions of the
+                                    // view: the ViewModel resolves the pan against its
+                                    // own post-zoom window, so the two can't disagree
+                                    // about how wide the view is mid-pinch. Content
+                                    // follows the fingers — dragging right moves the
+                                    // window towards the clip's start.
+                                    onTransformView(zoomFactor, -panX / width, center)
+                                }
+                            }
+                            // Claim it so the scrolling pane can't steal a pinch.
+                            event.changes.forEach { it.consume() }
+                            continue
+                        }
+                        if (abandoned) continue
+
+                        val change = pressed.first()
+                        val dx = change.position.x - down.position.x
+                        val dy = change.position.y - down.position.y
+                        if (!scrubbing) {
+                            // Vertical drags belong to the Ready pane's scroll: bow
+                            // out without consuming so the ancestor picks them up.
+                            if (abs(dy) > slop && abs(dy) > abs(dx)) {
+                                abandoned = true
+                                continue
+                            }
+                            if (abs(dx) > slop) scrubbing = true
+                        }
+                        if (scrubbing && change.positionChanged()) {
+                            dragged = true
+                            onScrubAtViewNorm((change.position.x / width).coerceIn(0f, 1f))
+                            change.consume()
+                        }
+                    }
+
+                    // A tap that never became a drag scrubs where it landed.
+                    if (!dragged && !transforming && !abandoned) {
+                        onScrubAtViewNorm((down.position.x / width).coerceIn(0f, 1f))
+                    }
                 }
             },
     ) {
-        val n = peaks.size
-        if (n == 0) return@Canvas
+        val width = size.width
+        if (width <= 0f || viewFrames <= 0 || totalFrames <= 0) return@Canvas
+
+        val colCount = width.toInt().coerceAtLeast(1)
+        columns.ensure(colCount)
+        peaks.columns(viewStartFrame, viewFrames, colCount, samples, columns.min, columns.max)
 
         val midY = size.height / 2f
-        val slot = size.width / n
-        val barWidth = (slot * 0.7f).coerceAtLeast(1f)
-        val progressX = progress.coerceIn(0f, 1f) * size.width
+        // Whole-clip norm → window-relative pixels. The frame math is Double and the
+        // window offset is subtracted before anything narrows to Float: Float holds
+        // only ~16.7M exactly (~379 s at 44.1 kHz), so a half-hour import would drift
+        // the playhead off the waveform when zoomed in near its tail.
+        val playheadFrame = progress.coerceIn(0f, 1f).toDouble() * totalFrames
+        val playheadX = ((playheadFrame - viewStartFrame) / viewFrames * width).toFloat()
 
-        for (i in 0 until n) {
-            val x = i * slot + (slot - barWidth) / 2f
-            val half = (peaks[i].coerceIn(0f, 1f) * midY).coerceAtLeast(1f)
+        for (c in 0 until colCount) {
+            val top = midY - columns.max[c] * midY
+            val bottom = midY - columns.min[c] * midY
             drawRect(
-                color = if (x <= progressX) playedColor else waveColor,
-                topLeft = Offset(x, midY - half),
-                size = Size(barWidth, half * 2f),
+                color = if (c <= playheadX) playedColor else waveColor,
+                topLeft = Offset(c.toFloat(), top),
+                // Silence would otherwise vanish; keep a 1px centre line.
+                size = Size(1f, (bottom - top).coerceAtLeast(1f)),
             )
         }
 
-        drawRect(
-            color = playedColor,
-            topLeft = Offset(progressX - 1f, 0f),
-            size = Size(2f, size.height),
+        if (playheadX >= 0f && playheadX <= width) {
+            drawRect(
+                color = playedColor,
+                topLeft = Offset(playheadX - 1f, 0f),
+                size = Size(2f, size.height),
+            )
+        }
+    }
+}
+
+/**
+ * Scratch buffers for [Waveform]'s per-column envelope, grown to the canvas width
+ * and reused across draws — a fresh pair of arrays every frame would hand the GC
+ * a few hundred KB a second during a pan.
+ */
+private class WaveformColumns {
+    var min: FloatArray = FloatArray(0)
+        private set
+    var max: FloatArray = FloatArray(0)
+        private set
+
+    fun ensure(size: Int) {
+        if (min.size < size) {
+            min = FloatArray(size)
+            max = FloatArray(size)
+        }
+    }
+}
+
+/** Waveform zoom buttons: out / fit / in, matching the desktop's toolbar. */
+@Composable
+private fun ZoomControls(
+    onZoomOut: () -> Unit,
+    onZoomToFit: () -> Unit,
+    onZoomIn: () -> Unit,
+) {
+    val zoomOutDesc = stringResource(R.string.zoom_out_desc)
+    val zoomFitDesc = stringResource(R.string.zoom_fit_desc)
+    val zoomInDesc = stringResource(R.string.zoom_in_desc)
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        TextButton(
+            onClick = onZoomOut,
+            modifier = Modifier.semantics { contentDescription = zoomOutDesc },
+        ) {
+            Text(stringResource(R.string.zoom_out), style = MaterialTheme.typography.titleMedium)
+        }
+        TextButton(
+            onClick = onZoomToFit,
+            modifier = Modifier.semantics { contentDescription = zoomFitDesc },
+        ) {
+            Text(stringResource(R.string.zoom_fit))
+        }
+        TextButton(
+            onClick = onZoomIn,
+            modifier = Modifier.semantics { contentDescription = zoomInDesc },
+        ) {
+            Text(stringResource(R.string.zoom_in), style = MaterialTheme.typography.titleMedium)
+        }
+    }
+}
+
+/** A slider with a leading caption — the pane has two, and they do different things. */
+@Composable
+private fun LabelledSlider(
+    label: String,
+    value: Float,
+    valueRange: ClosedFloatingPointRange<Float>,
+    onValueChange: (Float) -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.width(12.dp))
+        Slider(
+            value = value,
+            onValueChange = onValueChange,
+            valueRange = valueRange,
+            modifier = Modifier.weight(1f),
         )
     }
 }
@@ -738,6 +973,9 @@ private fun RecordButton(isRecording: Boolean, enabled: Boolean, onClick: () -> 
 }
 
 private val RecordRed = Color(0xFFE53935)
+
+/** Desktop parity: one zoom button press is 1.3×. */
+private const val ZoomStep = 1.3f
 
 private val PlaybackModeOptions = listOf(
     ScrubPlayer.PlaybackMode.PITCH_PRESERVE to R.string.mode_pitch_preserve,

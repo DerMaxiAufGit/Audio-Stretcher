@@ -21,9 +21,10 @@ all flow through the same scrub/playback path.
 1. **Record** from the microphone, in-app, to a 16-bit PCM mono WAV file
    (44.1 kHz) in the app's private `filesDir`.
 2. **Scrub / play back** that recording:
-   - A waveform (downsampled peak amplitudes) drawn on a `Canvas`.
-   - Drag the waveform (or the slider) to **scrub** — each drag plays a short
-     grain around the dragged position, so it feels like scratching a record.
+   - A waveform drawn on a `Canvas` as a **min/max peak envelope**, one column
+     per pixel, for the currently visible window.
+   - Drag the waveform (or the position slider) to **scrub** — each drag plays a
+     short grain around the dragged position, so it feels like scratching a record.
    - Play / pause, plus elapsed / total time as `m:ss`.
 3. **Import** any audio *or* video file (SAF picker, `audio/*` + `video/*`):
    decoded via the platform `MediaExtractor` / `MediaCodec` stack — the first
@@ -47,6 +48,17 @@ all flow through the same scrub/playback path.
    `AudioTrack.setPlaybackParams` — pitch-preserve maps to `speed=rate,
    pitch=pitchRatio`; turntable maps to `speed=rate, pitch=rate × pitchRatio`.
    No hand-written DSP.
+6. **Waveform zoom / scroll + time ruler**, matching the desktop:
+   - **Pinch** with two fingers to zoom and pan; one finger still scrubs. Buttons
+     for **−** / **Fit** / **+** (1.3× per step, centred on the zoom point), and a
+     **Pan** scrollbar once zoomed in (distinct from the whole-clip **Position**
+     slider, which seeks).
+   - Zoom clamps at the whole clip (fit) on the way out; on the way in it stops at
+     a 64-frame window — the stand-in for the desktop's 1 sample/pixel limit.
+   - During playback the view **recentres when the playhead leaves the window**.
+   - An **adaptive time ruler** above the waveform picks the tick interval that
+     keeps labels ~72 dp apart (10 ms … 6 h), with 5 minor ticks per major and a
+     label format that adapts (`M:SS`, `M:SS.C`, `M:SS.CC`, `H:MM:SS`).
 
 Runtime permissions: RECORD_AUDIO is requested with a rationale card and a denied
 state; POST_NOTIFICATIONS (API 33+) is requested when arming Instant Replay. The
@@ -59,7 +71,13 @@ Replay (arming is blocked while a manual recording is in progress).
 
 - `audio/WavIo.kt` — streaming WAV **writer** (placeholder header patched on
   close, so nothing is buffered in RAM while recording), a chunk-scanning WAV
-  **reader** → `ShortArray`, and a **peak downsampler** for the waveform.
+  **reader** → `ShortArray`, and a **peak downsampler**.
+- `audio/WaveformPeaks.kt` — the waveform's **min/max envelope index**: per-bucket
+  extremes over 64 frames, built once per load off the main thread. `columns()`
+  fills caller-supplied arrays with the per-pixel envelope of the visible window,
+  aggregating buckets when zoomed out (`framesPerPixel >= bucketFrames`) and
+  scanning raw PCM when zoomed in past that — so drawing never allocates and
+  stays O(visible).
 - `audio/AudioRecorder.kt` — `AudioRecord` capture on a dedicated background
   thread; clean start/stop; releases the recorder in `finally`.
 - `audio/ScrubPlayer.kt` — `AudioTrack` in `MODE_STREAM` rendering from an
@@ -81,8 +99,12 @@ Replay (arming is blocked while a manual recording is in progress).
   the live armed state to the ViewModel.
 - `ui/RecorderViewModel.kt` — wires recorder + player + importer + Instant Replay,
   exposes `StateFlow`s (`uiState`, `playhead`, `isPlaying`, `isImporting`,
-  `errorMessage`, `isInstantReplayOn`, `bufferSeconds`), and releases both audio
-  engines in `onCleared()`.
+  `errorMessage`, `isInstantReplayOn`, `bufferSeconds`), owns the waveform's view
+  window (`totalFrames`, `viewStartFrame`, `viewFrames` + `zoomBy`/`zoomToFit`/
+  `panByFrames`/`setViewStartFrame`), and releases both audio engines in
+  `onCleared()`.
+- `ui/TimeRuler.kt` — the adaptive ruler over the waveform's visible window
+  (nice-step tick interval, minor ticks, scale-dependent labels).
 
 No memory or resource leaks: `AudioRecord` and `AudioTrack` are released, worker
 threads are joined/self-terminate on stop, the mic gate is released on every exit
@@ -103,9 +125,9 @@ android/
     src/main/res/…           # strings, themes, backup/data-extraction rules
     src/main/java/de/maxihaaser/audioscratch/
       MainActivity.kt
-      audio/{WavIo,AudioRecorder,ScrubPlayer,AudioImporter,AudioRingBuffer,MicGate}.kt
+      audio/{WavIo,WaveformPeaks,AudioRecorder,ScrubPlayer,AudioImporter,AudioRingBuffer,MicGate}.kt
       service/{InstantReplayService,ClipEvents}.kt
-      ui/{RecorderViewModel,RecordScrubScreen}.kt
+      ui/{RecorderViewModel,RecordScrubScreen,TimeRuler}.kt
       ui/theme/{Color,Theme,Type}.kt
 ```
 
@@ -154,11 +176,10 @@ Until the JAR exists, `./gradlew` will fail with
 ## Roadmap — towards full desktop parity
 
 Implemented: in-app recording, waveform scrubbing, **audio/video import**,
-**mic-only Instant Replay**, and the **transport / DSP controls** (speed, pitch,
-pitch-preserve ⇄ turntable, volume/mute). Still remaining for desktop parity:
+**mic-only Instant Replay**, the **transport / DSP controls** (speed, pitch,
+pitch-preserve ⇄ turntable, volume/mute), and **waveform zoom / scroll** with an
+adaptive **time ruler**. Still remaining for desktop parity:
 
-- **Waveform zoom & scroll** + an adaptive **time ruler** (desktop has +/−/fit,
-  wheel zoom, and a tick ruler).
 - **A/B loop:** set A / set B / clear / enable, draggable handles, shaded region,
   and click-free wrap at the loop point.
 - **Markers:** drop at playhead, jump prev/next, rename, delete, flags on a bar.

@@ -39,4 +39,15 @@
     <string name="volume_value">%1$d%%</string>
     <string name="mute_label">Mute</string>
     <string name="time_position">%1$s / %2$s</string>
+
+    <!-- Waveform zoom / pan -->
+    <string name="zoom_out">−</string>
+    <string name="zoom_out_desc">Zoom out</string>
+    <string name="zoom_fit">Fit</string>
+    <string name="zoom_fit_desc">Zoom to fit</string>
+    <string name="zoom_in">+</string>
+    <string name="zoom_in_desc">Zoom in</string>
+    <string name="pan_label">Pan</string>
+    <string name="position_label">Position</string>
+    <string name="waveform_desc">Waveform. Drag to scrub, pinch with two fingers to zoom.</string>
 </resources>
