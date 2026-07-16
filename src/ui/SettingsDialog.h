@@ -11,6 +11,7 @@
 
 class QSpinBox;
 class QComboBox;
+class QKeySequenceEdit;
 
 namespace as {
 
@@ -31,6 +32,7 @@ private:
     QSpinBox*  bufferSpin_ = nullptr;
     QComboBox* sourceCombo_ = nullptr;
     QComboBox* micCombo_ = nullptr;
+    QKeySequenceEdit* clipHotkeyEdit_ = nullptr;   // hotkey for "clip last N seconds"
 };
 
 } // namespace as

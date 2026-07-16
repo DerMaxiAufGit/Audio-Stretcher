@@ -7,6 +7,7 @@
 #include <QMainWindow>
 
 class QScrollBar;
+class QShortcut;
 
 namespace as {
 
@@ -32,6 +33,8 @@ private slots:
 
 private:
     void syncScrollBar();
+    void clipInstantReplay();   // save last N s -> clip (button + hotkey share this)
+    void updateClipHotkey();    // re-read capture/clipHotkey -> live QShortcut
 
     Deck* deck_ = nullptr;
     VideoView* video_ = nullptr;
@@ -42,6 +45,7 @@ private:
     InstantReplayControls* instantReplay_ = nullptr;
     TimeRulerBar* ruler_ = nullptr;
     QScrollBar*   hScroll_ = nullptr;
+    QShortcut*    clipShortcut_ = nullptr;   // Instant Replay "clip last N s" hotkey
 };
 
 } // namespace as

@@ -141,12 +141,15 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         if (!active && wasArmed)
             statusBar()->showMessage("Instant Replay: capture device failed to start", 4000);
     });
-    connect(instantReplay_, &InstantReplayControls::clipRequested, this, [this] {
-        if (deck_->clipLastSeconds())
-            statusBar()->showMessage("Saved instant-replay clip", 3000);
-        else
-            statusBar()->showMessage("Nothing captured yet — arm Instant Replay first", 3000);
-    });
+    connect(instantReplay_, &InstantReplayControls::clipRequested,
+            this, &MainWindow::clipInstantReplay);
+    // ...and the same action on a configurable hotkey (Capture Settings). A
+    // window-focused QShortcut whose key is (re)loaded from QSettings; seeded now so
+    // the default fires even before the user opens Settings.
+    clipShortcut_ = new QShortcut(this);
+    clipShortcut_->setContext(Qt::WindowShortcut);
+    connect(clipShortcut_, &QShortcut::activated, this, &MainWindow::clipInstantReplay);
+    updateClipHotkey();
     connect(instantReplay_, &InstantReplayControls::openSettingsRequested, this, [this] {
         // Fresh dialog per open so its constructor's load() always reflects the
         // current QSettings; settingsChanged() then re-reads them into the live path.
@@ -155,6 +158,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             deck_->applyCaptureSettings();
             instantReplay_->setBufferSeconds(
                 QSettings().value("capture/bufferSeconds", 30).toInt());
+            updateClipHotkey();
         });
         dlg.exec();
     });
@@ -219,6 +223,22 @@ void MainWindow::syncScrollBar() {
     hScroll_->setRange(0, maxv);
     hScroll_->setValue(std::clamp(val, 0, maxv));
     hScroll_->setEnabled(maxv > 0);
+}
+
+void MainWindow::clipInstantReplay() {
+    // Shared by the "Clip last Ns" button and the Instant Replay hotkey.
+    if (deck_->clipLastSeconds())
+        statusBar()->showMessage("Saved instant-replay clip", 3000);
+    else
+        statusBar()->showMessage("Nothing captured yet — arm Instant Replay first", 3000);
+}
+
+void MainWindow::updateClipHotkey() {
+    if (!clipShortcut_) return;
+    // Default matches SettingsDialog's kDefaultClipHotkey; an empty stored value
+    // (user pressed Clear) yields a null sequence, which disables the shortcut.
+    const QString hk = QSettings().value("capture/clipHotkey", "Ctrl+Alt+R").toString();
+    clipShortcut_->setKey(QKeySequence(hk, QKeySequence::PortableText));
 }
 
 void MainWindow::openFile() {

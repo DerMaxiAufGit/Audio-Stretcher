@@ -5,6 +5,10 @@
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QFormLayout>
+#include <QHBoxLayout>
+#include <QKeySequence>
+#include <QKeySequenceEdit>
+#include <QPushButton>
 #include <QSettings>
 #include <QSpinBox>
 #include <QVBoxLayout>
@@ -20,8 +24,13 @@ namespace {
 constexpr auto kKeyBufferSeconds = "capture/bufferSeconds";
 constexpr auto kKeySource        = "capture/source";
 constexpr auto kKeyMicDevice     = "capture/micDevice";
+constexpr auto kKeyClipHotkey    = "capture/clipHotkey";
 
 constexpr int kDefaultBufferSeconds = 30;
+// Instant-Replay "clip last N seconds" shortcut. In-app (window-focused) hotkey;
+// MainWindow reads the same key + default and drives the live QShortcut. Stored as
+// QKeySequence::PortableText so it round-trips across platforms/locales.
+constexpr auto kDefaultClipHotkey = "Ctrl+Alt+R";
 
 // Source-combo item-data tokens, matching the persisted "capture/source" values.
 constexpr auto kSourceDesktop    = "desktop";
@@ -52,10 +61,26 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     micCombo_->setToolTip("Microphone mixed into the capture when the source includes it");
     populateMicDevices();
 
+    // Instant-Replay hotkey: a key-sequence editor plus a Clear button (empty = no
+    // hotkey). Works while the AudioScratch window is focused; MainWindow owns the
+    // live QShortcut and re-reads this on settingsChanged().
+    clipHotkeyEdit_ = new QKeySequenceEdit(this);
+    clipHotkeyEdit_->setToolTip(
+        "Shortcut to save the last N seconds as a clip. Works while AudioScratch is focused.");
+    auto* clearHotkey = new QPushButton("Clear", this);
+    clearHotkey->setToolTip("Remove the Instant Replay hotkey");
+    connect(clearHotkey, &QPushButton::clicked, clipHotkeyEdit_, &QKeySequenceEdit::clear);
+    auto* hotkeyRow = new QWidget(this);
+    auto* hotkeyLayout = new QHBoxLayout(hotkeyRow);
+    hotkeyLayout->setContentsMargins(0, 0, 0, 0);
+    hotkeyLayout->addWidget(clipHotkeyEdit_, 1);
+    hotkeyLayout->addWidget(clearHotkey, 0);
+
     auto* form = new QFormLayout;
     form->addRow("Buffer length", bufferSpin_);
     form->addRow("Capture source", sourceCombo_);
     form->addRow("Microphone", micCombo_);
+    form->addRow("Instant Replay hotkey", hotkeyRow);
 
     auto* buttons =
         new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
@@ -91,6 +116,10 @@ void SettingsDialog::load() {
     const QString micId = settings.value(kKeyMicDevice).toString();
     const int mi = micCombo_->findData(micId);
     if (mi >= 0) micCombo_->setCurrentIndex(mi);
+
+    clipHotkeyEdit_->setKeySequence(QKeySequence(
+        settings.value(kKeyClipHotkey, kDefaultClipHotkey).toString(),
+        QKeySequence::PortableText));
 }
 
 void SettingsDialog::save() {
@@ -98,6 +127,8 @@ void SettingsDialog::save() {
     settings.setValue(kKeyBufferSeconds, bufferSpin_->value());
     settings.setValue(kKeySource, sourceCombo_->currentData().toString());
     settings.setValue(kKeyMicDevice, micCombo_->currentData().toString());
+    settings.setValue(kKeyClipHotkey,
+                      clipHotkeyEdit_->keySequence().toString(QKeySequence::PortableText));
     emit settingsChanged();
 }
 

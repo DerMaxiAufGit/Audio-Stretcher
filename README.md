@@ -54,6 +54,9 @@ Play/Pause is the only thing that stops the deck. Use the pitch/speed sliders an
 **Pitch-preserve ⟷ Turntable** button below the waveform; set an A/B loop with **Set A** /
 **Set B** (drag the handles to fine-tune, tick **Loop** to enable); drop a marker at the
 playhead with **M** (or **Add Marker**) and jump between markers with **,** / **.**.
+Arm **Instant Replay** to keep the last N seconds of desktop audio buffered, then save
+that clip on demand with **Ctrl+Alt+R** (rebindable — or clear it — under **Settings…**
+on the Instant Replay strip; the hotkey fires while the AudioScratch window is focused).
 
 > **Licensing note (R16):** the app links FFmpeg dynamically. The system FFmpeg on many
 > distros is a **GPL** build (`--enable-gpl`) — fine for local development (Phase 1 only
