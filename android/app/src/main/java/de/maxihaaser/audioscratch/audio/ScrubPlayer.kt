@@ -21,6 +21,13 @@ class ScrubPlayer {
     private enum class Mode { IDLE, PLAYING, SCRUBBING }
 
     /**
+     * An A/B loop over `[beginFrame, endFrame)`. Only honoured by the render loop
+     * when [enabled] and the region is non-empty *after* being clamped to the
+     * loaded clip; see [setLoop].
+     */
+    private data class Loop(val beginFrame: Int, val endFrame: Int, val enabled: Boolean)
+
+    /**
      * How pitch behaves when the transport rate changes. [PITCH_PRESERVE] holds
      * pitch while tempo shifts; [VARISPEED] lets pitch ride the rate like a
      * turntable / vinyl.
@@ -52,6 +59,15 @@ class ScrubPlayer {
 
     @Volatile
     private var playbackMode = PlaybackMode.PITCH_PRESERVE
+
+    /**
+     * The A/B loop, as one immutable value so the worker reads begin/end/enabled
+     * together. Three separate @Volatile fields could be torn across a write —
+     * the worker could see a new `begin` against a stale `end` and wrap to a
+     * position outside the region the UI is drawing.
+     */
+    @Volatile
+    private var loop = Loop(0, 0, false)
 
     // What was last pushed to the track, so redundant applies are skipped. NaN
     // forces the next apply — [load] resets these for the freshly built track.
@@ -155,6 +171,23 @@ class ScrubPlayer {
     /** Set the software output gain (`0f`..`2f`; `0f` = muted). Applied live. */
     fun setGain(g: Float) {
         gain = g.coerceIn(0f, 2f)
+    }
+
+    /**
+     * Arm or disarm the A/B loop over `[beginFrame, endFrame)`. While enabled and
+     * non-empty, continuous playback wraps from `endFrame` back to `beginFrame`
+     * instead of running on. Scrubbing ignores the loop entirely, so a drag stays
+     * a free drag across the whole clip.
+     *
+     * A degenerate region (`endFrame <= beginFrame`) is stored as given but never
+     * acted on, so the caller can't strand the playhead in a zero-width loop.
+     * Bounds outside the loaded clip are clamped by the worker rather than
+     * rejected here — the clip can change under a loop that was set against the
+     * previous one. Safe to call while playing; the worker picks the new value up
+     * on its next chunk.
+     */
+    fun setLoop(beginFrame: Int, endFrame: Int, enabled: Boolean) {
+        loop = Loop(beginFrame, endFrame, enabled)
     }
 
     /**
@@ -280,7 +313,32 @@ class ScrubPlayer {
                     if (total == 0) {
                         mode = Mode.IDLE
                     } else {
-                        val remaining = total - positionFrames
+                        // One read of the loop holder for the whole step, so begin/end/
+                        // enabled can't shift underneath the wrap and the chunk clamp.
+                        // Bounds are re-clamped against *this* clip: the UI's frames may
+                        // predate a shorter clip being loaded.
+                        val lp = loop
+                        val loopBegin = lp.beginFrame.coerceIn(0, total)
+                        val loopEnd = lp.endFrame.coerceIn(0, total)
+                        // Never while SCRUBBING: a drag stays free across the whole clip
+                        // and only resumes looping on release, mirroring the desktop's
+                        // `playing() && !scrubbing()` guard.
+                        val looping = mode == Mode.PLAYING && lp.enabled && loopEnd > loopBegin
+
+                        if (looping && positionFrames >= loopEnd) {
+                            // Reached B — or the loop was armed with the playhead already
+                            // past it — so jump back to A. Unlike the desktop, which resets
+                            // its stretcher at the wrap, this is a plain position jump: a
+                            // small discontinuity is possible at the seam.
+                            positionFrames = loopBegin
+                        }
+
+                        // Clamp the read to B so the chunk never crosses the loop's end.
+                        // While looping this is always > positionFrames (the wrap above
+                        // guarantees it), so the completion branch below is unreachable —
+                        // onCompletion can only fire on the clip's true end, never a wrap.
+                        val limit = if (looping) loopEnd else total
+                        val remaining = limit - positionFrames
                         if (remaining <= 0) {
                             if (mode == Mode.PLAYING) completed = true
                             mode = Mode.IDLE

@@ -50,4 +50,24 @@
     <string name="pan_label">Pan</string>
     <string name="position_label">Position</string>
     <string name="waveform_desc">Waveform. Drag to scrub, pinch with two fingers to zoom.</string>
+
+    <!-- A/B loop + markers -->
+    <string name="loop_label">A/B loop</string>
+    <string name="loop_set_a">Set A</string>
+    <string name="loop_set_b">Set B</string>
+    <string name="loop_clear">Clear</string>
+    <string name="loop_marker_bar_desc">Loop region and markers. Drag the A and B handles to adjust the loop, tap a marker to jump to it, long-press a marker for more options.</string>
+    <string name="markers_label">Markers</string>
+    <string name="marker_add">+ Marker</string>
+    <string name="marker_add_desc">Add marker at playhead</string>
+    <string name="marker_prev">◀ Marker</string>
+    <string name="marker_prev_desc">Previous marker</string>
+    <string name="marker_next">Marker ▶</string>
+    <string name="marker_next_desc">Next marker</string>
+    <string name="marker_rename">Rename</string>
+    <string name="marker_delete">Delete</string>
+    <string name="marker_jump">Jump</string>
+    <string name="marker_label">Marker label</string>
+    <string name="ok">OK</string>
+    <string name="cancel">Cancel</string>
 </resources>

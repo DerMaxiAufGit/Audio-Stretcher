@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.updateAndGet
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -67,6 +68,22 @@ sealed interface UiState {
  * Nothing loaded is `ViewWindow(0, 0)`.
  */
 data class ViewWindow(val startFrame: Int, val frames: Int)
+
+/**
+ * The A/B loop over `[beginFrame, endFrame)`, plus whether it is armed.
+ *
+ * One immutable value rather than three [StateFlow]s for the same reason as
+ * [ViewWindow], and because the whole thing is pushed to
+ * [ScrubPlayer.setLoop] as a unit: a reader (or the player's worker) must never
+ * see a `beginFrame` paired with an `endFrame` from a different edit.
+ *
+ * Invariant, re-established by [RecorderViewModel.clampLoop] on every mutation:
+ * `0 <= beginFrame <= endFrame <= totalFrames`. Bounds are clamped, never
+ * swapped, so a drag past the opposite handle stalls there instead of the two
+ * silently trading places under the finger. `beginFrame == endFrame` is a
+ * degenerate region: it may be [enabled], but the player won't act on it.
+ */
+data class LoopRegion(val beginFrame: Int, val endFrame: Int, val enabled: Boolean)
 
 /**
  * Owns the record → scrub flow: wires [AudioRecorder] and [ScrubPlayer] together
@@ -148,6 +165,26 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
      */
     private val _viewWindow = MutableStateFlow(ViewWindow(0, 0))
     val viewWindow: StateFlow<ViewWindow> = _viewWindow.asStateFlow()
+
+    // --- A/B loop + markers ---
+
+    /**
+     * The A/B loop. Only ever written through [updateLoop], which re-establishes
+     * the [LoopRegion] invariants and mirrors the result into the player.
+     */
+    private val _loop = MutableStateFlow(LoopRegion(0, 0, false))
+    val loop: StateFlow<LoopRegion> = _loop.asStateFlow()
+
+    /** The clip's markers, always sorted by [Marker.frame]. */
+    private val _markers = MutableStateFlow<List<Marker>>(emptyList())
+    val markers: StateFlow<List<Marker>> = _markers.asStateFlow()
+
+    /**
+     * Source of stable [Marker.id]s, handed out in increasing order and reset with
+     * each clip (desktop parity: `DeckState::reset` restarts at 1). Only touched
+     * from the main thread, like every other marker mutation here.
+     */
+    private var nextMarkerId = 1L
 
     /** Whether the hosting Activity is in the foreground (set by MainActivity). */
     private var isForeground = false
@@ -299,6 +336,14 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
         _playhead.value = norm.coerceIn(0f, 1f)
     }
 
+    /**
+     * Move the playhead to an absolute [frame] without playing — what tapping a
+     * loop handle or a marker flag on [LoopMarkerBar] does.
+     */
+    fun seekToFrame(frame: Int) {
+        seekTo(normForFrame(frame))
+    }
+
     /** Scrub to a normalised position (plays a short grain). */
     fun scrub(norm: Float) {
         if (_uiState.value !is UiState.Ready) return
@@ -430,6 +475,170 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
      * and past this point the columns are sample-and-held anyway.
      */
     private fun minVisibleFrames(total: Int): Int = minOf(MIN_VISIBLE_FRAMES, total)
+
+    // --- A/B loop ---
+
+    /**
+     * The only way the loop is ever written: applies [transform], re-establishes
+     * the [LoopRegion] invariants via [clampLoop], and pushes the *resulting*
+     * value to the player — so what the UI draws and what the worker wraps on can
+     * never drift apart.
+     */
+    private fun updateLoop(transform: (LoopRegion) -> LoopRegion) {
+        val next = _loop.updateAndGet { clampLoop(transform(it)) }
+        player.setLoop(next.beginFrame, next.endFrame, next.enabled)
+    }
+
+    /**
+     * Re-establish the [LoopRegion] invariants against the loaded clip. Both
+     * bounds are decided here, together, from one read of the total.
+     *
+     * The end is clamped *up* to the begin rather than the two being swapped: an
+     * inverted region means a handle was dragged past its opposite, and stalling
+     * it there is what the user sees under the finger. A degenerate `begin == end`
+     * survives — the player ignores it — so dragging A onto B doesn't silently
+     * disarm a loop the user is still adjusting.
+     *
+     * A live region is held to [MIN_LOOP_FRAMES]. The render loop caps every write
+     * to the distance remaining to the end, so a region narrower than one chunk
+     * would make each write one loop-width long and spin the max-priority render
+     * thread at `sampleRate / width` — up to tens of thousands of wraps a second
+     * for a few-frame loop, which is both a CPU burn and a zipper of seam clicks.
+     * Widening the end holds the floor; if that would run past the clip, the begin
+     * is pulled back instead. Width 0 is exempt — it's inert, not played.
+     */
+    private fun clampLoop(l: LoopRegion): LoopRegion {
+        val total = _totalFrames.value
+        if (total <= 0) return LoopRegion(0, 0, false) // nothing loaded — no loop to hold
+        var begin = l.beginFrame.coerceIn(0, total)
+        var end = l.endFrame.coerceIn(begin, total)
+        if (end > begin && end - begin < MIN_LOOP_FRAMES) {
+            if (begin + MIN_LOOP_FRAMES <= total) {
+                end = begin + MIN_LOOP_FRAMES
+            } else {
+                // Not enough clip left after `begin` — anchor the floor to the end.
+                end = total
+                begin = (total - MIN_LOOP_FRAMES).coerceAtLeast(0)
+            }
+        }
+        return LoopRegion(begin, end, l.enabled)
+    }
+
+    /**
+     * Snap the loop's start to the playhead ("Set A").
+     *
+     * Desktop parity (`LoopMarkerBar`'s setA): when the playhead is at or past B,
+     * B is pushed out to half a second after A rather than the press being clamped
+     * away — so Set A on a fresh clip yields a region you can actually see and
+     * then refine with Set B, instead of a zero-width one.
+     */
+    fun setLoopA() {
+        val a = playheadFrame()
+        updateLoop { l ->
+            val end = if (l.endFrame <= a) minOf(a + SAMPLE_RATE / 2, _totalFrames.value) else l.endFrame
+            l.copy(beginFrame = a, endFrame = end)
+        }
+    }
+
+    /**
+     * Snap the loop's end to the playhead ("Set B"). Mirrors [setLoopA]: a
+     * playhead at or before A pulls A back half a second instead of clamping the
+     * press away.
+     */
+    fun setLoopB() {
+        val b = playheadFrame()
+        updateLoop { l ->
+            val begin = if (l.beginFrame >= b) maxOf(b - SAMPLE_RATE / 2, 0) else l.beginFrame
+            l.copy(beginFrame = begin, endFrame = b)
+        }
+    }
+
+    /** Reset the loop bounds and disarm it (desktop's "Clear"). */
+    fun clearLoop() {
+        updateLoop { LoopRegion(0, 0, false) }
+    }
+
+    /** Arm or disarm the loop, leaving its bounds alone. */
+    fun setLoopEnabled(enabled: Boolean) {
+        updateLoop { it.copy(enabled = enabled) }
+    }
+
+    /** Move the loop's start to frame [f] — the A handle's drag entry point. */
+    fun setLoopBeginFrame(f: Int) {
+        updateLoop { l -> l.copy(beginFrame = f.coerceIn(0, l.endFrame)) }
+    }
+
+    /** Move the loop's end to frame [f] — the B handle's drag entry point. */
+    fun setLoopEndFrame(f: Int) {
+        updateLoop { l -> l.copy(endFrame = f.coerceAtLeast(l.beginFrame)) }
+    }
+
+    // --- markers ---
+
+    /** Drop a marker at the playhead with an empty label (desktop's `M`). */
+    fun addMarkerAtPlayhead() {
+        if (_uiState.value !is UiState.Ready) return
+        val marker = Marker(id = nextMarkerId++, frame = playheadFrame(), label = "")
+        // Re-sorting the whole list keeps the "sorted by frame" invariant in one
+        // place; a clip's marker count is small enough that an insert-at-index
+        // would only trade clarity for nothing.
+        _markers.update { (it + marker).sortedBy { m -> m.frame } }
+    }
+
+    /** Delete the marker with [id], if it still exists. */
+    fun removeMarker(id: Long) {
+        _markers.update { list -> list.filterNot { it.id == id } }
+    }
+
+    /** Re-label the marker with [id]. An empty [label] draws no text. */
+    fun renameMarker(id: Long, label: String) {
+        _markers.update { list -> list.map { if (it.id == id) it.copy(label = label) else it } }
+    }
+
+    /** Move the playhead to the marker with [id]. */
+    fun jumpToMarker(id: Long) {
+        val marker = _markers.value.firstOrNull { it.id == id } ?: return
+        seekTo(normForFrame(marker.frame))
+    }
+
+    /**
+     * Jump to the closest marker before the playhead (desktop's `,`). Strictly
+     * before, so a repeated press walks back through the list rather than sticking
+     * on the marker just landed on; a no-op when there is none.
+     */
+    fun jumpToPrevMarker() {
+        val here = playheadFrame()
+        val target = _markers.value.lastOrNull { it.frame < here } ?: return
+        seekTo(normForFrame(target.frame))
+    }
+
+    /** Jump to the closest marker after the playhead (desktop's `.`). */
+    fun jumpToNextMarker() {
+        val here = playheadFrame()
+        val target = _markers.value.firstOrNull { it.frame > here } ?: return
+        seekTo(normForFrame(target.frame))
+    }
+
+    /**
+     * The frame the playhead sits on. Goes through [Double]: [playhead] is a
+     * fraction of the whole clip, and Float carries only ~16.7M exactly (~379 s at
+     * 44.1 kHz), so a long clip would land Set A / Set B on the wrong frame.
+     */
+    private fun playheadFrame(): Int {
+        val total = _totalFrames.value
+        if (total <= 0) return 0
+        return (_playhead.value.coerceIn(0f, 1f).toDouble() * total)
+            .roundToLong()
+            .coerceIn(0L, total.toLong())
+            .toInt()
+    }
+
+    /** Inverse of [playheadFrame]: an absolute frame → a whole-clip `0..1` norm. */
+    private fun normForFrame(frame: Int): Float {
+        val total = _totalFrames.value
+        if (total <= 0) return 0f
+        return (frame.toDouble() / total).coerceIn(0.0, 1.0).toFloat()
+    }
 
     /** Set the playback speed (base rate), clamped to 0.25×..4×. */
     fun setSpeed(rate: Float) {
@@ -644,6 +853,12 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
         // A fresh clip starts zoomed to fit.
         _totalFrames.value = samples.size
         _viewWindow.value = clampWindow(0L, samples.size.toLong(), samples.size)
+        // Desktop parity (`DeckState::reset`): a new clip drops the old clip's loop
+        // and markers — their frames mean nothing here. Cleared before the play()
+        // below, so the worker can never wrap on the previous clip's bounds.
+        _markers.value = emptyList()
+        nextMarkerId = 1L
+        updateLoop { LoopRegion(0, 0, false) }
         _uiState.value = UiState.Ready(
             file = sourceFile,
             peaks = peaks,
@@ -667,6 +882,12 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
 
         /** Tightest waveform zoom, in frames across the whole view. */
         const val MIN_VISIBLE_FRAMES = 64
+
+        /**
+         * Narrowest playable A/B loop (~23 ms), matching the player's chunk size so
+         * every write stays a full chunk. See [clampLoop].
+         */
+        const val MIN_LOOP_FRAMES = 1024
         const val MIN_SPEED = 0.25f
         const val MAX_SPEED = 4f
         const val MAX_SEMITONES = 36

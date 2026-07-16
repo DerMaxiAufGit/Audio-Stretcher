@@ -101,6 +101,8 @@ fun RecordScrubScreen(
     val durationSeconds by viewModel.durationSeconds.collectAsState()
     val totalFrames by viewModel.totalFrames.collectAsState()
     val viewWindow by viewModel.viewWindow.collectAsState()
+    val loop by viewModel.loop.collectAsState()
+    val markers by viewModel.markers.collectAsState()
 
     Column(
         modifier = modifier
@@ -151,6 +153,8 @@ fun RecordScrubScreen(
                         durationSeconds = durationSeconds,
                         totalFrames = totalFrames,
                         viewWindow = viewWindow,
+                        loop = loop,
+                        markers = markers,
                         onScrub = viewModel::scrub,
                         onScrubAtViewNorm = viewModel::scrubAtViewNorm,
                         onZoomBy = viewModel::zoomBy,
@@ -166,6 +170,19 @@ fun RecordScrubScreen(
                         onSetPlaybackMode = viewModel::setPlaybackMode,
                         onSetVolumePercent = viewModel::setVolumePercent,
                         onSetMuted = viewModel::setMuted,
+                        onSetLoopA = viewModel::setLoopA,
+                        onSetLoopB = viewModel::setLoopB,
+                        onClearLoop = viewModel::clearLoop,
+                        onSetLoopEnabled = viewModel::setLoopEnabled,
+                        onSetLoopBeginFrame = viewModel::setLoopBeginFrame,
+                        onSetLoopEndFrame = viewModel::setLoopEndFrame,
+                        onSeekToFrame = viewModel::seekToFrame,
+                        onAddMarker = viewModel::addMarkerAtPlayhead,
+                        onPrevMarker = viewModel::jumpToPrevMarker,
+                        onNextMarker = viewModel::jumpToNextMarker,
+                        onJumpToMarker = viewModel::jumpToMarker,
+                        onRenameMarker = viewModel::renameMarker,
+                        onRemoveMarker = viewModel::removeMarker,
                     )
 
                     UiState.Recording -> RecordingIndicator()
@@ -392,6 +409,8 @@ private fun ReadyContent(
     durationSeconds: Float,
     totalFrames: Int,
     viewWindow: ViewWindow,
+    loop: LoopRegion,
+    markers: List<Marker>,
     onScrub: (Float) -> Unit,
     onScrubAtViewNorm: (Float) -> Unit,
     onZoomBy: (Float, Float) -> Unit,
@@ -407,6 +426,19 @@ private fun ReadyContent(
     onSetPlaybackMode: (ScrubPlayer.PlaybackMode) -> Unit,
     onSetVolumePercent: (Int) -> Unit,
     onSetMuted: (Boolean) -> Unit,
+    onSetLoopA: () -> Unit,
+    onSetLoopB: () -> Unit,
+    onClearLoop: () -> Unit,
+    onSetLoopEnabled: (Boolean) -> Unit,
+    onSetLoopBeginFrame: (Int) -> Unit,
+    onSetLoopEndFrame: (Int) -> Unit,
+    onSeekToFrame: (Int) -> Unit,
+    onAddMarker: () -> Unit,
+    onPrevMarker: () -> Unit,
+    onNextMarker: () -> Unit,
+    onJumpToMarker: (Long) -> Unit,
+    onRenameMarker: (Long, String) -> Unit,
+    onRemoveMarker: (Long) -> Unit,
 ) {
     // The ViewModel holds the window as one value; unpack it here for the widgets
     // that only care about a single bound.
@@ -445,6 +477,21 @@ private fun ReadyContent(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(160.dp),
+        )
+
+        // Shares the waveform's width and window, so the loop region and the flags
+        // line up with the audio they mark — and with the ruler above it.
+        LoopMarkerBar(
+            viewWindow = viewWindow,
+            loop = loop,
+            markers = markers,
+            onSetLoopBeginFrame = onSetLoopBeginFrame,
+            onSetLoopEndFrame = onSetLoopEndFrame,
+            onSeekToFrame = onSeekToFrame,
+            onJumpToMarker = onJumpToMarker,
+            onRenameMarker = onRenameMarker,
+            onRemoveMarker = onRemoveMarker,
+            modifier = Modifier.fillMaxWidth(),
         )
 
         ZoomControls(
@@ -489,6 +536,19 @@ private fun ReadyContent(
         PlayPauseButton(isPlaying = isPlaying, onClick = onTogglePlay)
 
         Spacer(Modifier.height(20.dp))
+
+        LoopMarkerControls(
+            loopEnabled = loop.enabled,
+            onSetLoopA = onSetLoopA,
+            onSetLoopB = onSetLoopB,
+            onClearLoop = onClearLoop,
+            onSetLoopEnabled = onSetLoopEnabled,
+            onAddMarker = onAddMarker,
+            onPrevMarker = onPrevMarker,
+            onNextMarker = onNextMarker,
+        )
+
+        Spacer(Modifier.height(12.dp))
 
         PitchSpeedControls(
             speed = speed,
@@ -625,6 +685,101 @@ private fun PitchSpeedControls(
                     ) {
                         Text(stringResource(labelRes))
                     }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * A/B loop and marker controls. The desktop drives these from the keyboard (`M`
+ * to add a marker, `,` / `.` to step between them) and from a toolbar; touch has
+ * no hotkeys, so every action gets a button. The A/B bounds themselves are set
+ * from the playhead — drag the handles on [LoopMarkerBar] to fine-tune them.
+ */
+@Composable
+private fun LoopMarkerControls(
+    loopEnabled: Boolean,
+    onSetLoopA: () -> Unit,
+    onSetLoopB: () -> Unit,
+    onClearLoop: () -> Unit,
+    onSetLoopEnabled: (Boolean) -> Unit,
+    onAddMarker: () -> Unit,
+    onPrevMarker: () -> Unit,
+    onNextMarker: () -> Unit,
+) {
+    val addDesc = stringResource(R.string.marker_add_desc)
+    val prevDesc = stringResource(R.string.marker_prev_desc)
+    val nextDesc = stringResource(R.string.marker_next_desc)
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = stringResource(R.string.loop_label),
+                    style = MaterialTheme.typography.titleSmall,
+                )
+                Spacer(Modifier.weight(1f))
+                Switch(checked = loopEnabled, onCheckedChange = onSetLoopEnabled)
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TextButton(onClick = onSetLoopA, modifier = Modifier.weight(1f)) {
+                    Text(stringResource(R.string.loop_set_a))
+                }
+                TextButton(onClick = onSetLoopB, modifier = Modifier.weight(1f)) {
+                    Text(stringResource(R.string.loop_set_b))
+                }
+                TextButton(onClick = onClearLoop, modifier = Modifier.weight(1f)) {
+                    Text(stringResource(R.string.loop_clear))
+                }
+            }
+
+            Spacer(Modifier.height(8.dp))
+
+            Text(
+                text = stringResource(R.string.markers_label),
+                style = MaterialTheme.typography.titleSmall,
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TextButton(
+                    onClick = onPrevMarker,
+                    modifier = Modifier
+                        .weight(1f)
+                        .semantics { contentDescription = prevDesc },
+                ) {
+                    Text(stringResource(R.string.marker_prev))
+                }
+                TextButton(
+                    onClick = onAddMarker,
+                    modifier = Modifier
+                        .weight(1f)
+                        .semantics { contentDescription = addDesc },
+                ) {
+                    Text(stringResource(R.string.marker_add))
+                }
+                TextButton(
+                    onClick = onNextMarker,
+                    modifier = Modifier
+                        .weight(1f)
+                        .semantics { contentDescription = nextDesc },
+                ) {
+                    Text(stringResource(R.string.marker_next))
                 }
             }
         }
