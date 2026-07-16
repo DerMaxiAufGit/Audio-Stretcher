@@ -27,7 +27,7 @@ REPO="$(cd "$HERE/../.." && pwd)"
 BUILD="${BUILD_DIR:-$REPO/build}"
 WORK="${WORK_DIR:-$REPO/build/appimage-work}"
 FFMPEG_TAG="${FFMPEG_TAG:-n8.1.2}"   # MUST match the SONAME majors your app links
-OUT="${OUTPUT:-$REPO/AudioScratch-v0.2.1-x86_64.AppImage}"
+OUT="${OUTPUT:-$REPO/AudioScratch-v0.2.2-x86_64.AppImage}"
 mkdir -p "$WORK"; cd "$WORK"
 
 [ -x "$BUILD/audioscratch" ] || { echo "build the app first: cmake --build $BUILD"; exit 1; }
@@ -65,7 +65,7 @@ magick -size 256x256 xc:'#14171c' -stroke '#58aaff' -strokewidth 7 -fill none \
   -stroke '#ff6060' -strokewidth 5 -draw "line 128,28 128,228" audioscratch.png
 for b in libavcodec libavformat libavutil libswresample libswscale; do cp -a "$FFMIN/lib/$b".so* AppDir/usr/lib/; done
 
-export APPIMAGE_EXTRACT_AND_RUN=1 NO_STRIP=1 VERSION=0.2.1 QMAKE="$WORK/qmake6"
+export APPIMAGE_EXTRACT_AND_RUN=1 NO_STRIP=1 VERSION=0.2.2 QMAKE="$WORK/qmake6"
 ./linuxdeploy.AppImage --appdir AppDir \
   -e "$BUILD/audioscratch" -d "$HERE/audioscratch.desktop" -i audioscratch.png \
   --exclude-library "libav*" --exclude-library "libsw*" \

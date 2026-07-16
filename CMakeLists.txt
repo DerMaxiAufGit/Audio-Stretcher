@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(audioscratch VERSION 0.2.1 LANGUAGES C CXX)
+project(audioscratch VERSION 0.2.2 LANGUAGES C CXX)
 
 # --- Global settings -------------------------------------------------------
 set(CMAKE_CXX_STANDARD 20)
