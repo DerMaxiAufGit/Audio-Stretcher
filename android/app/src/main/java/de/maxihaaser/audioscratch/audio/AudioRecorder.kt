@@ -1,6 +1,7 @@
 package de.maxihaaser.audioscratch.audio
 
 import android.annotation.SuppressLint
+import android.media.AudioDeviceInfo
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
@@ -40,9 +41,14 @@ class AudioRecorder(
      * Start recording into [outFile], overwriting any previous contents. The
      * RECORD_AUDIO permission must already be granted. Returns `true` if capture
      * started, `false` if the recorder could not be initialised.
+     *
+     * [preferredDevice] is the user's chosen microphone, or `null` for the system
+     * default. It arrives already resolved (see [InputDevices.resolve]) rather than
+     * as an id plus a Context: this class has no Context and doesn't want one — the
+     * caller has an Application and is already off the main thread.
      */
     @SuppressLint("MissingPermission")
-    fun start(outFile: File): Boolean {
+    fun start(outFile: File, preferredDevice: AudioDeviceInfo? = null): Boolean {
         synchronized(startStopLock) {
             if (recording.get()) return false
             stopRequested = false
@@ -99,6 +105,18 @@ class AudioRecorder(
             var writer: WavIo.Writer? = null
             try {
                 writer = WavIo.Writer(outFile, sampleRate, channels = 1)
+                // Route capture to the user's chosen input, on this thread rather than
+                // the caller's: it's a device-routing binder call, and on the calling
+                // thread it sat between the STATE_INITIALIZED check and `recording`
+                // being published — widening the window where a concurrent stop() sees
+                // recording==false, returns without joining, and lets the caller read
+                // back the *previous* take from outFile as if it were this one.
+                // Best-effort: setPreferredDevice returns false when the device can't
+                // take the route, and a vanished device is already null — either way the
+                // system default stands and the session still records.
+                if (preferredDevice != null) {
+                    runCatching { record.setPreferredDevice(preferredDevice) }
+                }
                 record.startRecording()
                 while (recording.get()) {
                     val read = record.read(buffer, 0, buffer.size)

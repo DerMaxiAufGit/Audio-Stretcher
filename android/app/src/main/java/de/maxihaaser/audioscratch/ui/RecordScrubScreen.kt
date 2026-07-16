@@ -45,7 +45,9 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -93,6 +95,7 @@ fun RecordScrubScreen(
     val errorMessage by viewModel.errorMessage.collectAsState()
     val isInstantReplayOn by viewModel.isInstantReplayOn.collectAsState()
     val bufferSeconds by viewModel.bufferSeconds.collectAsState()
+    val micDeviceId by viewModel.micDeviceId.collectAsState()
     val speed by viewModel.speed.collectAsState()
     val pitchSemitones by viewModel.pitchSemitones.collectAsState()
     val pitchCents by viewModel.pitchCents.collectAsState()
@@ -106,6 +109,10 @@ fun RecordScrubScreen(
     val markers by viewModel.markers.collectAsState()
     val hasVideo by viewModel.hasVideo.collectAsState()
     val videoFrame by viewModel.videoFrame.collectAsState()
+
+    // Desktop parity: capture settings live behind a modal dialog, opened from the
+    // Instant Replay strip.
+    var showSettings by remember { mutableStateOf(false) }
 
     Column(
         modifier = modifier
@@ -244,31 +251,53 @@ fun RecordScrubScreen(
         InstantReplayCard(
             isOn = isInstantReplayOn,
             bufferSeconds = bufferSeconds,
-            // Mic exclusivity: can't arm / change the buffer while a manual
-            // recording owns the microphone.
+            // Mic exclusivity: can't arm while a manual recording owns the microphone.
             enabled = uiState !is UiState.Recording,
             onToggle = onSetInstantReplay,
-            onSelectSeconds = onSetBufferSeconds,
+            onOpenSettings = { showSettings = true },
         )
 
         Spacer(Modifier.height(8.dp))
+
+        if (showSettings) {
+            // Enumerated once per opening rather than on every recomposition: the
+            // list only changes when a device is plugged in or out, and this composes
+            // again on every playhead tick.
+            val devices = remember { viewModel.inputDevices() }
+            SettingsDialog(
+                bufferSeconds = bufferSeconds,
+                micDeviceId = micDeviceId,
+                devices = devices,
+                // Exactly the ViewModel's rule, so the control can't lie in either
+                // direction: the ring is sized at arm time, so a change is refused
+                // while armed — but a manual recording doesn't touch the ring, and
+                // locking the buffer during one would refuse an edit that is fine.
+                bufferLocked = isInstantReplayOn,
+                onConfirm = { seconds, deviceId ->
+                    onSetBufferSeconds(seconds)
+                    viewModel.setMicDeviceId(deviceId)
+                    showSettings = false
+                },
+                onDismiss = { showSettings = false },
+            )
+        }
     }
 }
 
 /**
- * Instant Replay ("shadowplay") controls: a switch to arm a rolling mic buffer
- * plus a 15 / 30 / 60 s length selector (locked while armed, since the ring is
- * sized at arm time). Clips are saved from the ongoing notification's "Clip now"
- * button. Only shown once RECORD_AUDIO is granted (the caller gates on that).
+ * Instant Replay ("shadowplay") controls: a switch to arm a rolling mic buffer,
+ * the current buffer length in the status line, and a "Settings…" button — desktop
+ * parity, where the strip opens the same modal dialog. Clips are saved from the
+ * ongoing notification's "Clip now" button. Only shown once RECORD_AUDIO is
+ * granted (the caller gates on that).
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun InstantReplayCard(
     isOn: Boolean,
     bufferSeconds: Int,
     enabled: Boolean,
     onToggle: (Boolean) -> Unit,
-    onSelectSeconds: (Int) -> Unit,
+    onOpenSettings: () -> Unit,
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
@@ -296,42 +325,37 @@ private fun InstantReplayCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
 
-            Spacer(Modifier.height(12.dp))
-
-            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                BufferSecondOptions.forEachIndexed { index, sec ->
-                    SegmentedButton(
-                        selected = bufferSeconds == sec,
-                        // Length is baked into the ring at arm time; lock it on while
-                        // armed, and while a manual recording owns the mic.
-                        enabled = enabled && !isOn,
-                        onClick = { onSelectSeconds(sec) },
-                        shape = SegmentedButtonDefaults.itemShape(
-                            index = index,
-                            count = BufferSecondOptions.size,
-                        ),
-                    ) {
-                        Text(stringResource(R.string.ir_seconds_format, sec))
-                    }
-                }
-            }
-
             Spacer(Modifier.height(8.dp))
 
-            Text(
-                text = if (isOn) {
-                    stringResource(R.string.ir_status_on, bufferSeconds)
-                } else {
-                    stringResource(R.string.ir_status_off)
-                },
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.primary,
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                // Carries the buffer length either way, now that the length lives in
+                // the settings dialog rather than on a row of chips here.
+                Text(
+                    text = if (isOn) {
+                        stringResource(R.string.ir_status_on, bufferSeconds)
+                    } else {
+                        stringResource(R.string.ir_status_off, bufferSeconds)
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.weight(1f),
+                )
+                Spacer(Modifier.width(8.dp))
+                // Stays available while armed: the mic device can still be changed
+                // (it applies to the next session) and the dialog explains why the
+                // buffer length can't.
+                // Gated like the Switch beside it: the buffer chips this replaced were
+                // disabled during a recording too.
+                TextButton(onClick = onOpenSettings, enabled = enabled) {
+                    Text(stringResource(R.string.settings_button))
+                }
+            }
         }
     }
 }
-
-private val BufferSecondOptions = listOf(15, 30, 60)
 
 @Composable
 private fun PermissionCard(onRequestPermission: () -> Unit) {

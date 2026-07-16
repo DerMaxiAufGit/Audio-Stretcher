@@ -173,26 +173,53 @@ Until the JAR exists, `./gradlew` will fail with
 > APK. `local.properties` is git-ignored; the wrapper JAR is intentionally not
 > committed (regenerate it as above).
 
-## Roadmap — towards full desktop parity
+## Desktop parity
 
-Implemented: in-app recording, waveform scrubbing, **audio/video import**,
-**mic-only Instant Replay**, the **transport / DSP controls** (speed, pitch,
-pitch-preserve ⇄ turntable, volume/mute), and **waveform zoom / scroll** with an
-adaptive **time ruler**. Still remaining for desktop parity:
+The app now covers the desktop application's feature set: in-app recording,
+waveform scrubbing, **audio/video import**, **mic-only Instant Replay**, the
+**transport / DSP controls** (speed, pitch, pitch-preserve ⇄ turntable,
+volume/mute), **waveform zoom / scroll** with an adaptive **time ruler**,
+**A/B loop**, **markers**, **video-frame scrubbing**, and a persisted
+**settings** surface.
 
-- **A/B loop:** set A / set B / clear / enable, draggable handles, shaded region,
-  and click-free wrap at the loop point.
-- **Markers:** drop at playhead, jump prev/next, rename, delete, flags on a bar.
-- **Video display while scrubbing:** import already decodes a video's audio
-  track; showing synced video frames under the playhead is not built.
-- **Settings surface** with persistence (buffer length etc.).
-- **Polish:** a proper adaptive launcher icon (ships without a custom icon),
-  multiple saved takes, exporting clips to shared storage (MediaStore) rather
-  than app-private `filesDir`, and stereo capture.
+Features the desktop app doesn't have either (and so aren't parity gaps): project
+save/load, undo/redo, an effects rack, a multi-clip timeline, render-to-MP4,
+drag-and-drop, and a recent-files list.
 
-### Known residual risk
+### Deliberate divergences from the desktop
 
-Instant Replay's mic gate is released when the capture loop's blocking
-`AudioRecord.read()` returns. If the audio HAL ever stalls a read indefinitely
-(rare vendor/driver/Bluetooth-handoff bug), the gate could stay held until the
-process is killed. There is no read-timeout watchdog yet.
+- **Instant Replay is microphone-only.** The desktop captures the output mix
+  (WASAPI loopback / PulseAudio monitor) with an optional mic mix; that was a
+  product decision for this app, and Android has no equivalent unrestricted
+  system-audio capture anyway. The settings dialog therefore drops the desktop's
+  *capture source* and *mic device mix* options, keeping a plain input picker.
+- **No clip hotkey.** The desktop's `Ctrl+Alt+R` has no touch equivalent — the
+  ongoing notification's **Clip now** action is the stand-in, so the hotkey
+  setting is omitted.
+- **Touch gestures replace mouse ones.** Pinch replaces wheel-zoom; long-press a
+  marker flag replaces right-click; buttons replace the `M` / `,` / `.` keys.
+- **Time-stretch is Android's Sonic engine**, not the desktop's Bungee/Signalsmith
+  pair, and the scrub grain is not a position-based stretcher — so extreme-speed
+  scrub artefacts won't sound identical to the desktop.
+- **Video seeks to keyframes** (`OPTION_CLOSEST_SYNC`), mirroring the desktop's
+  keyframe-seek approach. On a long-GOP file the picture can therefore sit behind
+  the playhead until the next keyframe.
+
+### Remaining polish
+
+- A proper adaptive launcher icon (ships without a custom one).
+- Multiple saved takes; exporting clips to shared storage (MediaStore) rather than
+  app-private `filesDir`.
+- Stereo capture (the pipeline is mono end to end).
+- A loop wrap that resets the stretcher, as the desktop does, to remove the small
+  seam discontinuity.
+
+### Known residual risks
+
+- Instant Replay's mic gate is released when the capture loop's blocking
+  `AudioRecord.read()` returns. If the audio HAL ever stalls a read indefinitely
+  (rare vendor/driver/Bluetooth-handoff bug), the gate could stay held until the
+  process is killed. There is no read-timeout watchdog yet.
+- **None of this has been exercised on a physical device or emulator** — it is
+  compile-verified and reviewed only. Audio routing, notification behaviour,
+  codec quirks, and gesture feel all need a real device pass.

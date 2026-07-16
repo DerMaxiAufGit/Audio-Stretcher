@@ -2,18 +2,22 @@ package de.maxihaaser.audioscratch.ui
 
 import android.app.Application
 import android.graphics.Bitmap
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import de.maxihaaser.audioscratch.R
 import de.maxihaaser.audioscratch.audio.AudioImporter
 import de.maxihaaser.audioscratch.audio.AudioRecorder
+import de.maxihaaser.audioscratch.audio.InputDevices
 import de.maxihaaser.audioscratch.audio.ScrubPlayer
 import de.maxihaaser.audioscratch.audio.WavIo
 import de.maxihaaser.audioscratch.audio.WaveformPeaks
 import de.maxihaaser.audioscratch.service.ClipEvents
 import de.maxihaaser.audioscratch.service.InstantReplayService
 import de.maxihaaser.audioscratch.service.InstantReplayState
+import de.maxihaaser.audioscratch.settings.AppSettings
 import de.maxihaaser.audioscratch.video.VideoScrubber
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -99,6 +103,9 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
     private val recorder = AudioRecorder(SAMPLE_RATE)
     private val player = ScrubPlayer()
 
+    /** Persisted capture settings — the source of the seeds below. */
+    private val settings = AppSettings(app)
+
     private val _uiState = MutableStateFlow<UiState>(UiState.Idle)
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
 
@@ -120,9 +127,19 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
     private val _isInstantReplayOn = MutableStateFlow(false)
     val isInstantReplayOn: StateFlow<Boolean> = _isInstantReplayOn.asStateFlow()
 
-    /** Rolling-buffer length (seconds) used when Instant Replay is armed. */
-    private val _bufferSeconds = MutableStateFlow(InstantReplayService.DEFAULT_SECONDS)
+    /**
+     * Rolling-buffer length (seconds) used when Instant Replay is armed. Seeded
+     * from the persisted setting, so the choice survives a restart.
+     */
+    private val _bufferSeconds = MutableStateFlow(settings.bufferSeconds)
     val bufferSeconds: StateFlow<Int> = _bufferSeconds.asStateFlow()
+
+    /**
+     * The input device both capture paths prefer, or [InputDevices.SYSTEM_DEFAULT_ID]
+     * for the system's own choice. Also seeded from the persisted setting.
+     */
+    private val _micDeviceId = MutableStateFlow(settings.micDeviceId)
+    val micDeviceId: StateFlow<Int> = _micDeviceId.asStateFlow()
 
     /** Playback speed / base rate, 0.25×..4×; 1× is normal tempo. */
     private val _speed = MutableStateFlow(1f)
@@ -277,6 +294,7 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
         // main thread; revert to Idle with an error if capture can't start.
         val wasInstantReplayOn = _isInstantReplayOn.value
         val outFile = recordingFile()
+        val deviceId = _micDeviceId.value
         _playhead.value = 0f
         _uiState.value = UiState.Recording
         viewModelScope.launch {
@@ -287,7 +305,10 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
                 if (wasInstantReplayOn) {
                     InstantReplayService.stop(getApplication())
                 }
-                recorder.start(outFile)
+                // Resolved here, off the main thread, so AudioRecorder stays
+                // Context-free. A stale id resolves to null → system default.
+                val device = preferredInputDevice(deviceId)
+                recorder.start(outFile, device)
             }
             if (!started) {
                 _uiState.value = UiState.Idle
@@ -867,12 +888,73 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * Choose the rolling-buffer length (seconds). Only takes effect while Instant
-     * Replay is off — the ring is allocated at this size when it arms.
+     * Choose the rolling-buffer length (seconds), clamped to the desktop's
+     * 1..120 s range and persisted. Only takes effect while Instant Replay is off —
+     * the ring is allocated at this size when it arms.
      */
     fun setBufferSeconds(sec: Int) {
         if (_isInstantReplayOn.value) return
-        _bufferSeconds.value = sec
+        val clamped = sec.coerceIn(AppSettings.MIN_BUFFER_SECONDS, AppSettings.MAX_BUFFER_SECONDS)
+        _bufferSeconds.value = clamped
+        settings.bufferSeconds = clamped
+    }
+
+    /**
+     * Choose the microphone both capture paths record from, or
+     * [InputDevices.SYSTEM_DEFAULT_ID] to leave it to the system. Persisted
+     * immediately.
+     *
+     * Unlike the buffer length this is always accepted, and applies to the *next*
+     * capture session: an AudioRecord's preferred device is set once, before it
+     * starts, so honouring a change mid-capture would mean tearing the mic down and
+     * reopening it under the user (dropping audio from a live Instant-Replay ring
+     * or a running recording). Re-arming — or starting the next recording — picks
+     * the new device up.
+     */
+    fun setMicDeviceId(id: Int) {
+        _micDeviceId.value = id
+        settings.micDeviceId = id
+    }
+
+    /**
+     * The pickable input devices as `id → label` pairs, always led by a
+     * "System default" ([InputDevices.SYSTEM_DEFAULT_ID]) entry — the fallback that
+     * is also what an unresolvable id lands on.
+     *
+     * Filtered to sources a user would call a microphone; the raw list also carries
+     * things like the telephony and FM tuner inputs, which this app can't record.
+     * Labels are de-duplicated with the device id, since two identical headsets (or
+     * a device whose product name is just its type) would otherwise be
+     * indistinguishable in the menu. Cheap enough to call when opening the dialog,
+     * which is the only caller.
+     */
+    fun inputDevices(): List<Pair<Int, String>> {
+        val entries = mutableListOf(
+            InputDevices.SYSTEM_DEFAULT_ID to string(R.string.settings_mic_default),
+        )
+        val manager = getApplication<Application>().getSystemService(AudioManager::class.java)
+            ?: return entries
+        val devices = runCatching { manager.getDevices(AudioManager.GET_DEVICES_INPUTS) }
+            .getOrNull() ?: return entries
+
+        val labels = mutableSetOf(entries[0].second)
+        for (device in devices) {
+            val typeName = string(INPUT_TYPE_LABELS[device.type] ?: continue)
+            val product = device.productName?.toString()?.trim().orEmpty()
+            val base = if (product.isEmpty() || product.equals(typeName, ignoreCase = true)) {
+                typeName
+            } else {
+                string(R.string.settings_mic_device_format, typeName, product)
+            }
+            // Device ids are unique, so the disambiguated label always is too.
+            val label = if (labels.add(base)) {
+                base
+            } else {
+                string(R.string.settings_mic_device_id_format, base, device.id)
+            }
+            entries += device.id to label
+        }
+        return entries
     }
 
     /**
@@ -886,7 +968,7 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
             // Mic exclusivity: a manual recording already owns the mic, so refuse to
             // arm and leave the switch off. The state is reconciled from the service.
             if (_uiState.value is UiState.Recording) return
-            InstantReplayService.start(context, _bufferSeconds.value)
+            InstantReplayService.start(context, _bufferSeconds.value, _micDeviceId.value)
         } else {
             InstantReplayService.stop(context)
         }
@@ -1041,12 +1123,35 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun recordingFile(): File = File(getApplication<Application>().filesDir, RECORDING_NAME)
 
+    /**
+     * The [AudioDeviceInfo] for [deviceId], or `null` for "system default" — which
+     * is also what a device that has since gone away resolves to. Queries the
+     * platform, so callers keep it off the main thread.
+     */
+    private fun preferredInputDevice(deviceId: Int): AudioDeviceInfo? =
+        InputDevices.resolve(getApplication(), deviceId)
+
     private fun string(resId: Int, vararg formatArgs: Any): String =
         getApplication<Application>().getString(resId, *formatArgs)
 
     private companion object {
         const val SAMPLE_RATE = 44_100
         const val RECORDING_NAME = "recording.wav"
+
+        /**
+         * The input types [inputDevices] offers, and the label each gets. Anything
+         * not listed here is dropped: the platform's input list also holds sources
+         * this app has no business recording from (telephony, FM tuner, the loopback
+         * / remote-submix inputs). USB devices and USB headsets share a label —
+         * "USB audio" is what the user plugged in either way.
+         */
+        val INPUT_TYPE_LABELS = mapOf(
+            AudioDeviceInfo.TYPE_BUILTIN_MIC to R.string.settings_mic_builtin,
+            AudioDeviceInfo.TYPE_WIRED_HEADSET to R.string.settings_mic_wired,
+            AudioDeviceInfo.TYPE_BLUETOOTH_SCO to R.string.settings_mic_bluetooth,
+            AudioDeviceInfo.TYPE_USB_DEVICE to R.string.settings_mic_usb,
+            AudioDeviceInfo.TYPE_USB_HEADSET to R.string.settings_mic_usb,
+        )
 
         /** Tightest waveform zoom, in frames across the whole view. */
         const val MIN_VISIBLE_FRAMES = 64

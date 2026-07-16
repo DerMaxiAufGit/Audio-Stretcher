@@ -21,6 +21,7 @@ import androidx.core.content.ContextCompat
 import de.maxihaaser.audioscratch.MainActivity
 import de.maxihaaser.audioscratch.R
 import de.maxihaaser.audioscratch.audio.AudioRingBuffer
+import de.maxihaaser.audioscratch.audio.InputDevices
 import de.maxihaaser.audioscratch.audio.MicGate
 import de.maxihaaser.audioscratch.audio.WavIo
 import java.io.File
@@ -69,7 +70,10 @@ class InstantReplayService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_START -> handleStart(intent.getIntExtra(EXTRA_SECONDS, DEFAULT_SECONDS))
+            ACTION_START -> handleStart(
+                intent.getIntExtra(EXTRA_SECONDS, DEFAULT_SECONDS),
+                intent.getIntExtra(EXTRA_DEVICE_ID, InputDevices.SYSTEM_DEFAULT_ID),
+            )
             ACTION_CLIP -> handleClip()
             ACTION_STOP -> handleStop()
         }
@@ -88,11 +92,17 @@ class InstantReplayService : Service() {
 
     // --- lifecycle -----------------------------------------------------------
 
-    private fun handleStart(seconds: Int) {
-        bufferSeconds = seconds
+    private fun handleStart(seconds: Int, deviceId: Int) {
+        // Clamp here rather than trusting the extra: `seconds` sizes the ring
+        // (seconds * 44100 shorts, plain Int arithmetic that would wrap), and the
+        // service's own start() API promises nothing about its input. Today every
+        // caller goes through AppSettings, which already coerces — this is the
+        // backstop so a future one can't allocate a garbage-sized buffer.
+        val safeSeconds = seconds.coerceIn(MIN_SECONDS, MAX_SECONDS)
+        bufferSeconds = safeSeconds
         // Must enter the foreground promptly after startForegroundService().
         startForegroundArmed()
-        startCapture(seconds)
+        startCapture(safeSeconds, deviceId)
     }
 
     private fun handleStop() {
@@ -108,7 +118,7 @@ class InstantReplayService : Service() {
     }
 
     @SuppressLint("MissingPermission")
-    private fun startCapture(seconds: Int) {
+    private fun startCapture(seconds: Int, deviceId: Int) {
         if (capturing) return
 
         val minBuffer = AudioRecord.getMinBufferSize(SAMPLE_RATE, channelConfig, audioEncoding)
@@ -159,6 +169,15 @@ class InstantReplayService : Service() {
             // the ring buffer consumes.
             val scratch = ShortArray(bufferBytes / 2)
             try {
+                // Route capture to the user's chosen input, before startRecording().
+                // Best-effort by design: an id that no longer resolves (headset
+                // unplugged since it was picked) or a device that refuses the route
+                // falls back to the system default — arming must never fail over a mic
+                // preference. Inside the try so even an unexpected throw here still
+                // hits the finally that frees the mic gate.
+                InputDevices.resolve(this@InstantReplayService, deviceId)?.let { device ->
+                    runCatching { record.setPreferredDevice(device) }
+                }
                 record.startRecording()
                 // Capture is actually live now — publish the real armed state.
                 InstantReplayState.running.value = true
@@ -337,10 +356,18 @@ class InstantReplayService : Service() {
         const val ACTION_STOP = "de.maxihaaser.audioscratch.action.INSTANT_REPLAY_STOP"
 
         const val EXTRA_SECONDS = "de.maxihaaser.audioscratch.extra.BUFFER_SECONDS"
+        const val EXTRA_DEVICE_ID = "de.maxihaaser.audioscratch.extra.MIC_DEVICE_ID"
         const val EXTRA_CLIP_PATH = "de.maxihaaser.audioscratch.extra.CLIP_PATH"
 
         /** Default rolling-buffer length in seconds. */
         const val DEFAULT_SECONDS = 30
+
+        // Bounds the service enforces on the buffer length before sizing the ring.
+        // Deliberately duplicated from AppSettings rather than imported: this is the
+        // backstop for a caller that didn't go through the settings layer, so it
+        // must not depend on it. Keep the two in step.
+        private const val MIN_SECONDS = 1
+        private const val MAX_SECONDS = 120
 
         private const val SAMPLE_RATE = 44_100
 
@@ -359,11 +386,20 @@ class InstantReplayService : Service() {
         // their PendingIntents don't collide.
         private val savedNotifCounter = AtomicInteger(SAVED_NOTIF_BASE)
 
-        /** Arm Instant Replay with a rolling buffer of [seconds] seconds. */
-        fun start(context: Context, seconds: Int) {
+        /**
+         * Arm Instant Replay with a rolling buffer of [seconds] seconds, captured
+         * from the input device with [deviceId] ([InputDevices.SYSTEM_DEFAULT_ID],
+         * the default, leaves the choice to the system).
+         */
+        fun start(
+            context: Context,
+            seconds: Int,
+            deviceId: Int = InputDevices.SYSTEM_DEFAULT_ID,
+        ) {
             val intent = Intent(context, InstantReplayService::class.java).apply {
                 action = ACTION_START
                 putExtra(EXTRA_SECONDS, seconds)
+                putExtra(EXTRA_DEVICE_ID, deviceId)
             }
             ContextCompat.startForegroundService(context, intent)
         }

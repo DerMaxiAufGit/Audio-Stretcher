@@ -19,9 +19,29 @@
     <string name="ir_switch_helper">Keeps a rolling buffer of the last few seconds of microphone audio. Tap “Clip now” in the notification to save it.</string>
     <string name="ir_seconds_format">%1$d s</string>
     <string name="ir_status_on">Buffering last %1$d s… use the notification\'s “Clip now” button.</string>
-    <string name="ir_status_off">Off. Turn on to keep the last few seconds ready to save.</string>
+    <string name="ir_status_off">Off. Turn on to keep the last %1$d s ready to save.</string>
     <string name="clip_load_failed">Couldn\'t open that clip.</string>
     <string name="record_start_failed">Couldn\'t start recording — the microphone may be in use.</string>
+
+    <!-- Capture settings dialog (desktop parity: its "Capture Settings" dialog).
+         No "capture source" row — this app is microphone-only and never captures
+         device audio — and no hotkey row: a touch device has no keyboard, so the
+         notification's “Clip now” action stands in for it. -->
+    <string name="settings_button">Settings…</string>
+    <string name="settings_title">Capture Settings</string>
+    <string name="settings_buffer_label">Instant Replay buffer</string>
+    <string name="settings_buffer_locked">Turn Instant Replay off to change the buffer length.</string>
+    <string name="settings_mic_label">Microphone</string>
+    <string name="settings_mic_helper">Which microphone recordings and Instant Replay capture from. Applies to the next session.</string>
+    <string name="settings_mic_default">System default</string>
+    <string name="settings_mic_builtin">Built-in microphone</string>
+    <string name="settings_mic_wired">Wired headset</string>
+    <string name="settings_mic_bluetooth">Bluetooth headset</string>
+    <string name="settings_mic_usb">USB audio</string>
+    <!-- Input device label: type, then the device's own product name. -->
+    <string name="settings_mic_device_format">%1$s — %2$s</string>
+    <!-- Falls back to the device id when two inputs would otherwise read alike. -->
+    <string name="settings_mic_device_id_format">%1$s (#%2$d)</string>
 
     <!-- Playback controls -->
     <string name="speed_label">Speed</string>
