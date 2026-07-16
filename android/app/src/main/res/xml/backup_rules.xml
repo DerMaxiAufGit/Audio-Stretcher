@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+   Full-backup rules (Android 11 and lower). The MVP stores only a single
+   transient recording.wav in filesDir, so there is nothing to include or
+   exclude yet.
+   See https://developer.android.com/guide/topics/data/autobackup
+-->
+<full-backup-content>
+</full-backup-content>

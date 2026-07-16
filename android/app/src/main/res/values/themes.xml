@@ -1,0 +1,9 @@
+<resources>
+    <!--
+        Base platform theme used only for the Activity window (background,
+        no action bar) before Compose takes over. Parented on the built-in
+        Material theme so we don't need the com.google.android.material
+        dependency; all real styling happens in Compose (AudioScratchTheme).
+    -->
+    <style name="Theme.AudioScratch" parent="@android:style/Theme.Material.Light.NoActionBar" />
+</resources>
