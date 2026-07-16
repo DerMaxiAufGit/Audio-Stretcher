@@ -12,9 +12,11 @@ APIs (`AudioRecord` / `AudioTrack`). It lives in this repo as a subproject under
 - **App name:** AudioScratch
 - **Min SDK:** 26 (Android 8.0) · **Target/Compile SDK:** 35 · **JVM target:** 17
 
-## What this MVP does
+## What this app does
 
-A single-Activity Compose app with exactly two capabilities:
+A single-Activity Compose app. Everything works in one canonical audio format —
+**mono, 44.1 kHz, 16-bit PCM** — end to end, so recordings, imports, and clips
+all flow through the same scrub/playback path.
 
 1. **Record** from the microphone, in-app, to a 16-bit PCM mono WAV file
    (44.1 kHz) in the app's private `filesDir`.
@@ -23,9 +25,23 @@ A single-Activity Compose app with exactly two capabilities:
    - Drag the waveform (or the slider) to **scrub** — each drag plays a short
      grain around the dragged position, so it feels like scratching a record.
    - Play / pause, plus elapsed / total time as `m:ss`.
+3. **Import** any audio *or* video file (SAF picker, `audio/*` + `video/*`):
+   decoded via the platform `MediaExtractor` / `MediaCodec` stack — the first
+   audio track wins, so a video decodes to just its soundtrack — then downmixed
+   to mono and resampled to 44.1 kHz and loaded straight into the scrubber.
+4. **Instant Replay** ("shadowplay"), **microphone only**: a foreground service
+   continuously keeps the **last N seconds** (15 / 30 / 60 s, default 30) of mic
+   audio in a rolling ring buffer, with an ongoing notification carrying a
+   **"Clip now"** button. Tapping it saves that window as a WAV and loads it into
+   the scrubber (in-app when foregrounded, or via a "Clip saved" notification).
+   It never captures device / system audio.
 
-The RECORD_AUDIO runtime permission is requested with a rationale card and a
-denied state.
+Runtime permissions: RECORD_AUDIO is requested with a rationale card and a denied
+state; POST_NOTIFICATIONS (API 33+) is requested when arming Instant Replay. The
+service declares `foregroundServiceType="microphone"` (+ FOREGROUND_SERVICE /
+FOREGROUND_SERVICE_MICROPHONE). Only one component can hold the mic, so a shared
+same-process gate hands the microphone off between manual recording and Instant
+Replay (arming is blocked while a manual recording is in progress).
 
 ### Audio implementation notes
 
@@ -38,12 +54,27 @@ denied state.
   in-memory `ShortArray` on one worker thread; `play`/`pause`/`seekTo(norm)`/
   `scrub(norm)`; playhead callback; `release()` tears everything down and is
   reusable via `load()`.
-- `ui/RecorderViewModel.kt` — wires recorder + player, exposes `StateFlow`s
-  (`uiState`, `playhead`, `isPlaying`), and releases both in `onCleared()`.
+- `audio/AudioImporter.kt` — decodes an arbitrary `content://` audio/video file
+  to mono 44.1 kHz 16-bit PCM using `MediaExtractor` + `MediaCodec` (16-bit and
+  float PCM outputs, channel downmix, linear resample); cancellable and capped at
+  ~10 min to bound memory.
+- `audio/AudioRingBuffer.kt` — a fixed-capacity, thread-safe mono ring buffer;
+  `snapshot()` returns the last N seconds in chronological order.
+- `audio/MicGate.kt` — a process-wide gate serialising microphone ownership
+  between the manual recorder and the Instant Replay service (ordered hand-off,
+  every `acquire()` matched by a `release()` on all exit paths).
+- `service/InstantReplayService.kt` — the mic-only foreground service: rolling
+  capture into the ring, the ongoing "Clip now" notification, and clip-to-WAV.
+- `service/ClipEvents.kt` — process-wide `StateFlow`s handing a saved clip and
+  the live armed state to the ViewModel.
+- `ui/RecorderViewModel.kt` — wires recorder + player + importer + Instant Replay,
+  exposes `StateFlow`s (`uiState`, `playhead`, `isPlaying`, `isImporting`,
+  `errorMessage`, `isInstantReplayOn`, `bufferSeconds`), and releases both audio
+  engines in `onCleared()`.
 
-No memory or resource leaks: both `AudioRecord` and `AudioTrack` are released,
-worker threads are joined on stop, and the ViewModel releases the player when it
-is cleared.
+No memory or resource leaks: `AudioRecord` and `AudioTrack` are released, worker
+threads are joined/self-terminate on stop, the mic gate is released on every exit
+path, and the ViewModel releases the player when it is cleared.
 
 ## Project layout
 
@@ -60,7 +91,8 @@ android/
     src/main/res/…           # strings, themes, backup/data-extraction rules
     src/main/java/de/maxihaaser/audioscratch/
       MainActivity.kt
-      audio/{WavIo,AudioRecorder,ScrubPlayer}.kt
+      audio/{WavIo,AudioRecorder,ScrubPlayer,AudioImporter,AudioRingBuffer,MicGate}.kt
+      service/{InstantReplayService,ClipEvents}.kt
       ui/{RecorderViewModel,RecordScrubScreen}.kt
       ui/theme/{Color,Theme,Type}.kt
 ```
@@ -102,24 +134,29 @@ here (it cannot be hand-written). The `gradlew` / `gradlew.bat` scripts and
 Until the JAR exists, `./gradlew` will fail with
 `Could not find or load main class org.gradle.wrapper.GradleWrapperMain`.
 
-> This subproject was authored without a local Android SDK or Gradle, so it has
-> not been compiled here. Expect Android Studio to want to add
-> `local.properties` (SDK path) and regenerate the wrapper JAR on first open —
-> both are git-ignored.
+> Once the wrapper JAR and a `local.properties` (SDK path) exist, the app builds
+> with a standard `./gradlew :app:assembleDebug` (JDK 17–21) and produces a debug
+> APK. `local.properties` is git-ignored; the wrapper JAR is intentionally not
+> committed (regenerate it as above).
 
 ## Roadmap — remaining scope of issue #5
 
-Everything below is **out of scope for this slice** and intentionally not built
-yet. It is captured here so the MVP can grow into the full feature set:
+Implemented: in-app recording, waveform scrubbing, **audio/video import**, and
+**mic-only Instant Replay**. Still remaining:
 
-- **Media import:** load existing audio/video files (SAF picker), decode via
-  `MediaExtractor` / `MediaCodec`, and scrub imported media rather than only
-  in-app recordings.
 - **Time-stretch DSP:** independent tempo/pitch control (phase-vocoder or
-  WSOLA), mirroring the desktop stretcher's behaviour.
-- **Instant Replay:** a foreground `Service` continuously buffering recent audio
-  with a persistent notification, so the last N seconds can be captured on
-  demand (the Android analogue of the desktop Instant Replay feature).
-- **Polish:** a proper adaptive launcher icon (the MVP ships without a custom
-  icon), variable-speed / reverse scrubbing with real resampling, waveform zoom,
-  multiple saved takes, and stereo capture.
+  WSOLA), mirroring the desktop stretcher's Bungee-based behaviour. The current
+  scrub is grain-based (turntable feel), not pitch-preserving time-stretch.
+- **Video display while scrubbing:** import already decodes a video's audio
+  track; showing synced video frames under the playhead is not built.
+- **Polish:** a proper adaptive launcher icon (ships without a custom icon),
+  variable-speed / reverse scrubbing with real resampling, waveform zoom,
+  multiple saved takes, exporting clips to shared storage (MediaStore) rather
+  than app-private `filesDir`, and stereo capture.
+
+### Known residual risk
+
+Instant Replay's mic gate is released when the capture loop's blocking
+`AudioRecord.read()` returns. If the audio HAL ever stalls a read indefinitely
+(rare vendor/driver/Bluetooth-handoff bug), the gate could stay held until the
+process is killed. There is no read-timeout watchdog yet.

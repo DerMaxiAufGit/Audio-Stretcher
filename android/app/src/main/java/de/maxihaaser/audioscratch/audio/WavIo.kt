@@ -106,6 +106,9 @@ object WavIo {
                 }
             }
             if (dataOffset >= 0) break
+            // A negative (or absurd) chunk size from a crafted file would seek
+            // backward or spin forever; a valid WAV always has size >= 0. Stop.
+            if (chunkSize < 0) break
             // Chunks are word-aligned: an odd size is followed by a pad byte.
             pos = body + chunkSize + (chunkSize and 1)
         }

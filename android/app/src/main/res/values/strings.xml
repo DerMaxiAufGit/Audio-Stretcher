@@ -1,3 +1,25 @@
 <resources>
     <string name="app_name">AudioScratch</string>
+    <string name="import_button">Import file</string>
+    <string name="importing_label">Decoding…</string>
+    <string name="import_failed">Couldn\'t import audio: %1$s</string>
+    <string name="import_error_empty">That file contained no audio.</string>
+    <string name="import_error_unknown">unknown error</string>
+    <string name="dismiss">Dismiss</string>
+
+    <!-- Instant Replay -->
+    <string name="ir_channel_name">Instant Replay</string>
+    <string name="ir_notif_title">Instant Replay armed</string>
+    <string name="ir_notif_text">Buffering the last %1$d s of mic audio</string>
+    <string name="ir_clip_now">Clip now</string>
+    <string name="ir_stop">Stop</string>
+    <string name="ir_saved_title">Clip saved</string>
+    <string name="ir_saved_text">Tap to open it in AudioScratch</string>
+    <string name="ir_switch_label">Instant Replay (mic)</string>
+    <string name="ir_switch_helper">Keeps a rolling buffer of the last few seconds of microphone audio. Tap “Clip now” in the notification to save it.</string>
+    <string name="ir_seconds_format">%1$d s</string>
+    <string name="ir_status_on">Buffering last %1$d s… use the notification\'s “Clip now” button.</string>
+    <string name="ir_status_off">Off. Turn on to keep the last few seconds ready to save.</string>
+    <string name="clip_load_failed">Couldn\'t open that clip.</string>
+    <string name="record_start_failed">Couldn\'t start recording — the microphone may be in use.</string>
 </resources>

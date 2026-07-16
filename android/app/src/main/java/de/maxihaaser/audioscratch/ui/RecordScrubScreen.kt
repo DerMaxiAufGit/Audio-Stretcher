@@ -25,9 +25,16 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -40,11 +47,13 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import de.maxihaaser.audioscratch.R
 
 /**
  * The single screen of the MVP: record from the mic, then scrub / play back the
@@ -57,11 +66,18 @@ fun RecordScrubScreen(
     viewModel: RecorderViewModel,
     hasPermission: Boolean,
     onRequestPermission: () -> Unit,
+    onImport: () -> Unit,
+    onSetInstantReplay: (Boolean) -> Unit,
+    onSetBufferSeconds: (Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val playhead by viewModel.playhead.collectAsState()
     val isPlaying by viewModel.isPlaying.collectAsState()
+    val isImporting by viewModel.isImporting.collectAsState()
+    val errorMessage by viewModel.errorMessage.collectAsState()
+    val isInstantReplayOn by viewModel.isInstantReplayOn.collectAsState()
+    val bufferSeconds by viewModel.bufferSeconds.collectAsState()
 
     Column(
         modifier = modifier
@@ -95,38 +111,159 @@ fun RecordScrubScreen(
                 .fillMaxWidth(),
             contentAlignment = Alignment.Center,
         ) {
-            when (val state = uiState) {
-                is UiState.Ready -> ReadyContent(
-                    state = state,
-                    playhead = playhead,
-                    isPlaying = isPlaying,
-                    onScrub = viewModel::scrub,
-                    onTogglePlay = viewModel::togglePlayback,
-                )
+            when {
+                isImporting -> ImportingIndicator()
 
-                UiState.Recording -> RecordingIndicator()
+                else -> when (val state = uiState) {
+                    is UiState.Ready -> ReadyContent(
+                        state = state,
+                        playhead = playhead,
+                        isPlaying = isPlaying,
+                        onScrub = viewModel::scrub,
+                        onTogglePlay = viewModel::togglePlayback,
+                    )
 
-                UiState.Idle -> Text(
-                    text = "Tap Record to capture audio from your microphone.",
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    textAlign = TextAlign.Center,
-                )
+                    UiState.Recording -> RecordingIndicator()
+
+                    UiState.Idle -> Text(
+                        text = "Tap Record to capture audio from your microphone.",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                    )
+                }
+            }
+        }
+
+        errorMessage?.let { message ->
+            Spacer(Modifier.height(12.dp))
+            Text(
+                text = message,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.error,
+                textAlign = TextAlign.Center,
+            )
+            TextButton(onClick = viewModel::clearError) {
+                Text(stringResource(R.string.dismiss))
             }
         }
 
         Spacer(Modifier.height(24.dp))
 
+        // Import is available whenever we're not mid-capture, so a new file can
+        // be loaded over a previous take.
+        if (uiState !is UiState.Recording) {
+            TextButton(
+                onClick = onImport,
+                enabled = !isImporting,
+            ) {
+                Text(stringResource(R.string.import_button))
+            }
+            Spacer(Modifier.height(4.dp))
+        }
+
         RecordButton(
             isRecording = uiState is UiState.Recording,
+            enabled = !isImporting,
             onClick = {
                 if (uiState is UiState.Recording) viewModel.stopRecording()
                 else viewModel.startRecording()
             },
         )
+
+        Spacer(Modifier.height(16.dp))
+
+        InstantReplayCard(
+            isOn = isInstantReplayOn,
+            bufferSeconds = bufferSeconds,
+            // Mic exclusivity: can't arm / change the buffer while a manual
+            // recording owns the microphone.
+            enabled = uiState !is UiState.Recording,
+            onToggle = onSetInstantReplay,
+            onSelectSeconds = onSetBufferSeconds,
+        )
+
         Spacer(Modifier.height(8.dp))
     }
 }
+
+/**
+ * Instant Replay ("shadowplay") controls: a switch to arm a rolling mic buffer
+ * plus a 15 / 30 / 60 s length selector (locked while armed, since the ring is
+ * sized at arm time). Clips are saved from the ongoing notification's "Clip now"
+ * button. Only shown once RECORD_AUDIO is granted (the caller gates on that).
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun InstantReplayCard(
+    isOn: Boolean,
+    bufferSeconds: Int,
+    enabled: Boolean,
+    onToggle: (Boolean) -> Unit,
+    onSelectSeconds: (Int) -> Unit,
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text(
+                    text = stringResource(R.string.ir_switch_label),
+                    style = MaterialTheme.typography.titleMedium,
+                )
+                Switch(checked = isOn, onCheckedChange = onToggle, enabled = enabled)
+            }
+
+            Spacer(Modifier.height(4.dp))
+
+            Text(
+                text = stringResource(R.string.ir_switch_helper),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            Spacer(Modifier.height(12.dp))
+
+            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                BufferSecondOptions.forEachIndexed { index, sec ->
+                    SegmentedButton(
+                        selected = bufferSeconds == sec,
+                        // Length is baked into the ring at arm time; lock it on while
+                        // armed, and while a manual recording owns the mic.
+                        enabled = enabled && !isOn,
+                        onClick = { onSelectSeconds(sec) },
+                        shape = SegmentedButtonDefaults.itemShape(
+                            index = index,
+                            count = BufferSecondOptions.size,
+                        ),
+                    ) {
+                        Text(stringResource(R.string.ir_seconds_format, sec))
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(8.dp))
+
+            Text(
+                text = if (isOn) {
+                    stringResource(R.string.ir_status_on, bufferSeconds)
+                } else {
+                    stringResource(R.string.ir_status_off)
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary,
+            )
+        }
+    }
+}
+
+private val BufferSecondOptions = listOf(15, 30, 60)
 
 @Composable
 private fun PermissionCard(onRequestPermission: () -> Unit) {
@@ -179,6 +316,18 @@ private fun RecordingIndicator() {
         Spacer(Modifier.height(12.dp))
         Text(
             text = "Recording…",
+            style = MaterialTheme.typography.titleMedium,
+        )
+    }
+}
+
+@Composable
+private fun ImportingIndicator() {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        CircularProgressIndicator()
+        Spacer(Modifier.height(12.dp))
+        Text(
+            text = stringResource(R.string.importing_label),
             style = MaterialTheme.typography.titleMedium,
         )
     }
@@ -331,9 +480,10 @@ private fun PlayPauseButton(isPlaying: Boolean, onClick: () -> Unit) {
 }
 
 @Composable
-private fun RecordButton(isRecording: Boolean, onClick: () -> Unit) {
+private fun RecordButton(isRecording: Boolean, enabled: Boolean, onClick: () -> Unit) {
     Button(
         onClick = onClick,
+        enabled = enabled,
         colors = if (isRecording) {
             ButtonDefaults.buttonColors(
                 containerColor = MaterialTheme.colorScheme.errorContainer,
