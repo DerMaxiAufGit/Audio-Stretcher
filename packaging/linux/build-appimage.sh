@@ -69,7 +69,10 @@ export APPIMAGE_EXTRACT_AND_RUN=1 NO_STRIP=1 VERSION=0.2.1 QMAKE="$WORK/qmake6"
 ./linuxdeploy.AppImage --appdir AppDir \
   -e "$BUILD/audioscratch" -d "$HERE/audioscratch.desktop" -i audioscratch.png \
   --exclude-library "libav*" --exclude-library "libsw*" \
-  --plugin qt --output none
+  --plugin qt
+# NB: no `--output` — linuxdeploy just populates the AppDir here; appimagetool (below)
+# does the actual packaging. (This linuxdeploy build rejects `--output none` as an
+# unknown output plugin — "Could not find plugin: none".)
 
 # --- 5. remove the orphaned system-GPL FFmpeg codec libs, then package -----------
 python3 "$HERE/trim-orphans.py" AppDir
