@@ -1,14 +1,17 @@
 #pragma once
 // Desktop-loopback (+ optional mic) capture into a rolling RingBuffer — the
-// "ShadowPlay" core (plan: capture the last N seconds on demand). WINDOWS.
+// "ShadowPlay" core (plan: capture the last N seconds on demand).
 //
-// Desktop audio is captured via miniaudio's WASAPI loopback (ma_device_type_loopback)
-// and is ALWAYS the primary source while capturing. A microphone (ma_device_type_capture)
-// can optionally be summed in. Everything is normalised to 48 kHz stereo float32 (let
-// miniaudio convert) and stored in ONE rolling RingBuffer holding the most recent
-// `bufferSeconds`. The UI thread pulls a snapshot of the last few seconds to save.
+// Desktop audio is ALWAYS the primary source while capturing. On Windows this uses
+// miniaudio's WASAPI loopback (ma_device_type_loopback). That device type is WASAPI-
+// only, so on Linux (PulseAudio/PipeWire) and other backends we instead open a normal
+// capture device on the default output's ".monitor" source, which mirrors what's
+// playing — see start()/findDesktopMonitorSource in the .cpp. A microphone
+// (ma_device_type_capture) can optionally be summed in. Everything is normalised to
+// 48 kHz stereo float32 (let miniaudio convert) and stored in ONE rolling RingBuffer
+// holding the most recent `bufferSeconds`. The UI thread pulls a snapshot to save.
 //
-// Threading: the desktop-loopback callback is the master clock — it writes its block
+// Threading: the desktop-capture callback is the master clock — it writes its block
 // into the main ring and, when the mic is enabled, pulls the same frame count from a
 // small intermediate mic ring and sums it (best-effort mix; minor drift between the
 // two device clocks is an accepted v1 limitation). Capture callbacks only write to
@@ -42,9 +45,10 @@ public:
     AudioCapture(const AudioCapture&) = delete;
     AudioCapture& operator=(const AudioCapture&) = delete;
 
-    // Open the desktop-loopback device (and, if requested, the mic) and begin the
-    // rolling capture. Returns false only if the loopback device fails to init/start;
-    // a mic failure degrades gracefully to desktop-only.
+    // Open the desktop-capture device (WASAPI loopback on Windows, else the default
+    // output's monitor source) and, if requested, the mic, then begin the rolling
+    // capture. Returns false only if the desktop device fails to init/start; a mic
+    // failure degrades gracefully to desktop-only.
     bool start(const Config& config);
     void stop();
     bool running() const;

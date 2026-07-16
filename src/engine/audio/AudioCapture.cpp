@@ -123,6 +123,56 @@ bool decodeDeviceId(const std::string& s, ma_device_id& out) {
     return true;
 }
 
+// Find a capture device that mirrors desktop output, for backends without a native
+// loopback device type (i.e. everything except WASAPI). PulseAudio/PipeWire expose a
+// ".monitor" source for every output sink; capturing from the default sink's monitor
+// is the equivalent of WASAPI loopback. Prefer "<default-sink>.monitor"; fall back to
+// any source whose id ends in ".monitor". Returns false if none exists (no desktop
+// capture possible) — the caller must NOT silently fall back to the default source,
+// which would record the microphone instead of the desktop.
+bool findDesktopMonitorSource(ma_context& ctx, ma_device_id& out) {
+    // Only the PulseAudio backend uses the ".monitor" convention (and only then is the
+    // ma_device_id.pulse union member the active one). WASAPI never reaches here.
+    if (ctx.backend != ma_backend_pulseaudio) return false;
+
+    ma_device_info* playback = nullptr; ma_uint32 playbackCount = 0;
+    ma_device_info* capture  = nullptr; ma_uint32 captureCount  = 0;
+    if (ma_context_get_devices(&ctx, &playback, &playbackCount,
+                               &capture, &captureCount) != MA_SUCCESS)
+        return false;
+
+    // The monitor source name for the *current* default output sink. Sized to hold a
+    // full pulse id (up to 256 chars) plus the ".monitor" suffix without truncation.
+    char wanted[sizeof(ma_device_id::pulse) + 16] = {0};
+    for (ma_uint32 i = 0; i < playbackCount; ++i) {
+        if (playback[i].isDefault) {
+            std::snprintf(wanted, sizeof(wanted), "%s.monitor", playback[i].id.pulse);
+            break;
+        }
+    }
+    if (wanted[0]) {
+        for (ma_uint32 i = 0; i < captureCount; ++i) {
+            if (std::strcmp(capture[i].id.pulse, wanted) == 0) {
+                out = capture[i].id;
+                return true;
+            }
+        }
+    }
+
+    // No default-sink match (or no default flagged): take the first monitor source.
+    const char* kSuffix = ".monitor";
+    const std::size_t suffixLen = std::strlen(kSuffix);
+    for (ma_uint32 i = 0; i < captureCount; ++i) {
+        const char* id = capture[i].id.pulse;
+        const std::size_t len = std::strlen(id);
+        if (len >= suffixLen && std::strcmp(id + (len - suffixLen), kSuffix) == 0) {
+            out = capture[i].id;
+            return true;
+        }
+    }
+    return false;
+}
+
 } // namespace
 
 AudioCapture::AudioCapture() : d_(std::make_unique<Impl>()) {}
@@ -183,7 +233,10 @@ bool AudioCapture::start(const Config& config) {
         }
     }
 
-    // --- Desktop loopback (always primary; master clock) ---
+    // --- Desktop capture (always primary; master clock) ---
+    // Prefer WASAPI loopback (Windows). On backends without a native loopback device
+    // type — PulseAudio/PipeWire on Linux report MA_DEVICE_TYPE_NOT_SUPPORTED — fall
+    // back to a normal capture device on the default output's ".monitor" source.
     ma_device_config loopCfg = ma_device_config_init(ma_device_type_loopback);
     loopCfg.capture.format   = ma_format_f32;
     loopCfg.capture.channels = 2;
@@ -191,8 +244,26 @@ bool AudioCapture::start(const Config& config) {
     loopCfg.dataCallback     = &Impl::loopbackCallback;
     loopCfg.pUserData        = d_.get();
 
-    if (ma_device_init(&d_->context, &loopCfg, &d_->loopbackDevice) != MA_SUCCESS) {
-        std::fprintf(stderr, "[capture] loopback ma_device_init failed\n");
+    ma_result r = ma_device_init(&d_->context, &loopCfg, &d_->loopbackDevice);
+    if (r == MA_DEVICE_TYPE_NOT_SUPPORTED) {
+        ma_device_id monitorId;
+        if (findDesktopMonitorSource(d_->context, monitorId)) {
+            ma_device_config capCfg = ma_device_config_init(ma_device_type_capture);
+            capCfg.capture.format    = ma_format_f32;
+            capCfg.capture.channels  = 2;
+            capCfg.capture.pDeviceID = &monitorId;
+            capCfg.sampleRate        = static_cast<ma_uint32>(d_->sampleRate);
+            capCfg.dataCallback      = &Impl::loopbackCallback;
+            capCfg.pUserData         = d_.get();
+            r = ma_device_init(&d_->context, &capCfg, &d_->loopbackDevice);
+        } else {
+            std::fprintf(stderr, "[capture] no desktop monitor source found "
+                                 "(need a PulseAudio/PipeWire output monitor)\n");
+        }
+    }
+    if (r != MA_SUCCESS) {
+        std::fprintf(stderr, "[capture] desktop ma_device_init failed: %s\n",
+                     ma_result_description(r));
         stop();
         return false;
     }
