@@ -40,6 +40,9 @@
     <string name="mute_label">Mute</string>
     <string name="time_position">%1$s / %2$s</string>
 
+    <!-- Video -->
+    <string name="video_desc">Video preview. Drag left or right across the picture to scrub.</string>
+
     <!-- Waveform zoom / pan -->
     <string name="zoom_out">−</string>
     <string name="zoom_out_desc">Zoom out</string>

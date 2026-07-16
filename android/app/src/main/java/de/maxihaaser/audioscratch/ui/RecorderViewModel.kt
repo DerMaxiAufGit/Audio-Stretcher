@@ -1,6 +1,7 @@
 package de.maxihaaser.audioscratch.ui
 
 import android.app.Application
+import android.graphics.Bitmap
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -13,6 +14,7 @@ import de.maxihaaser.audioscratch.audio.WaveformPeaks
 import de.maxihaaser.audioscratch.service.ClipEvents
 import de.maxihaaser.audioscratch.service.InstantReplayService
 import de.maxihaaser.audioscratch.service.InstantReplayState
+import de.maxihaaser.audioscratch.video.VideoScrubber
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -26,6 +28,7 @@ import java.io.File
 import java.io.IOException
 import kotlin.concurrent.thread
 import kotlin.coroutines.cancellation.CancellationException
+import kotlin.math.abs
 import kotlin.math.pow
 import kotlin.math.roundToLong
 
@@ -149,6 +152,34 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
     private val _durationSeconds = MutableStateFlow(0f)
     val durationSeconds: StateFlow<Float> = _durationSeconds.asStateFlow()
 
+    // --- video ---
+    // Optional: only an imported file can carry a video track (a recording and an
+    // Instant-Replay clip are mic audio). Everything here is torn down by
+    // [loadSamplesIntoPlayer] and re-attached, if there is video, by [importFromUri].
+
+    /** Whether the loaded file has a video track — gates the video pane. */
+    private val _hasVideo = MutableStateFlow(false)
+    val hasVideo: StateFlow<Boolean> = _hasVideo.asStateFlow()
+
+    /** The decoded frame at the playhead, or `null` before the first one lands. */
+    private val _videoFrame = MutableStateFlow<Bitmap?>(null)
+    val videoFrame: StateFlow<Bitmap?> = _videoFrame.asStateFlow()
+
+    /**
+     * Decodes frames for [videoFrame]. Published from the main thread on load and
+     * read from the player's worker thread in the playhead callback, hence
+     * `@Volatile`. `null` whenever the loaded source has no video.
+     */
+    @Volatile
+    private var videoScrubber: VideoScrubber? = null
+
+    /**
+     * Media position (µs) of the last frame request, or -1 before the first one.
+     * See [requestVideoFrame] for why a plain volatile is enough.
+     */
+    @Volatile
+    private var lastVideoRequestUs = -1L
+
     // --- waveform view window ---
     // The waveform shows a window of the clip rather than the whole thing. See
     // [ViewWindow] for the range it describes and the invariants every mutator
@@ -194,10 +225,12 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
 
     init {
         // Called on the player's worker thread. StateFlow writes are thread-safe,
-        // so both the playhead and the view-window follow are safe to do here.
+        // so the playhead, the view-window follow and the video request are all
+        // safe to do here.
         player.onPlayhead = { pos ->
             _playhead.value = pos
             followPlayhead(pos)
+            requestVideoFrame(pos)
         }
         player.onCompletion = { _isPlaying.value = false }
 
@@ -286,6 +319,10 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
      * Decode the audio (or video-with-audio) file at [uri] to the canonical
      * format on a background thread, then load it like a fresh recording. On
      * failure an [errorMessage] is surfaced for the UI to show.
+     *
+     * If the audio lands and the file also has a video track, a [VideoScrubber] is
+     * attached to [uri] for the video pane. Video is strictly optional: a file
+     * whose picture can't be opened still plays, exactly as before.
      */
     fun importFromUri(uri: Uri) {
         if (_uiState.value is UiState.Recording || _isImporting.value) return
@@ -303,6 +340,9 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
                     _errorMessage.value = string(R.string.import_error_empty)
                 } else {
                     loadSamplesIntoPlayer(samples, sourceFile = null)
+                    // Strictly after the load: loadSamplesIntoPlayer is the teardown
+                    // choke point and would release a scrubber attached before it.
+                    attachVideo(uri)
                 }
             } catch (e: CancellationException) {
                 throw e // never convert cancellation into a user-facing error
@@ -334,6 +374,11 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
         if (_uiState.value !is UiState.Ready) return
         player.seekTo(norm)
         _playhead.value = norm.coerceIn(0f, 1f)
+        // A silent seek renders nothing, so the player's worker won't emit a
+        // playhead: ask for the frame here or the picture would stall behind a
+        // marker jump / position-slider move. Forced past the throttle — a jump is
+        // one-shot, so nothing would come along afterwards to correct the picture.
+        requestVideoFrame(_playhead.value, force = true)
     }
 
     /**
@@ -351,6 +396,24 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
         _isPlaying.value = false
         player.scrub(norm)
         _playhead.value = norm.coerceIn(0f, 1f)
+        requestVideoFrame(_playhead.value)
+    }
+
+    /**
+     * Scrub by [deltaSeconds] of media time relative to where the playhead is now —
+     * the video pane's drag entry point.
+     *
+     * Desktop parity (`VideoView`): dragging the picture is *relative* motion, like
+     * pushing a record, rather than the waveform's "the x axis is the clip" absolute
+     * mapping. Goes through [scrub], so it plays the grain and cancels playback just
+     * like a waveform drag; the result is clamped to the clip.
+     */
+    fun scrubBySeconds(deltaSeconds: Double) {
+        if (_uiState.value !is UiState.Ready) return
+        val duration = _durationSeconds.value.toDouble()
+        if (duration <= 0.0) return
+        val next = (_playhead.value.toDouble() + deltaSeconds / duration).coerceIn(0.0, 1.0)
+        scrub(next.toFloat())
     }
 
     /**
@@ -467,6 +530,102 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
             if (frame >= w.startFrame && frame < w.startFrame + w.frames) return@update w
             clampWindow(frame - w.frames / 2, w.frames.toLong(), total)
         }
+    }
+
+    // --- video ---
+
+    /**
+     * Open [uri]'s video track, if it has one, and hand its frames to the pane.
+     * Called only from a completed [importFromUri], after the audio is loaded.
+     *
+     * The probe is blocking, so it runs on IO; the state writes land back on the
+     * caller's (main) thread. A file without video — or one whose picture the
+     * device can't parse — leaves [hasVideo] false and is not an error: the audio
+     * is already playing.
+     */
+    private suspend fun attachVideo(uri: Uri) {
+        val scrubber = VideoScrubber()
+        try {
+            val opened = withContext(Dispatchers.IO) { scrubber.open(getApplication(), uri) }
+            if (!opened) {
+                scrubber.release() // no-op when open() failed, but keeps the pairing honest
+                return
+            }
+            // Published from the scrubber's worker thread; a StateFlow write is safe
+            // there. The identity check drops a frame from a scrubber that has since
+            // been replaced: release() doesn't join, so a decode already in flight can
+            // still land here after the next file has loaded.
+            scrubber.onFrame = { bitmap ->
+                if (videoScrubber === scrubber) _videoFrame.value = bitmap
+            }
+            videoScrubber = scrubber
+            _hasVideo.value = true
+            // Show the opening frame straight away rather than waiting for the playhead
+            // to travel far enough to clear the throttle.
+            lastVideoRequestUs = -1L
+            requestVideoFrame(_playhead.value)
+        } catch (e: CancellationException) {
+            // open() is blocking, so cancelling the scope mid-probe still leaves a live
+            // worker + retriever behind — but the result is discarded and the line that
+            // publishes `scrubber` to the field never runs, so onCleared() would never
+            // see it. Release the local before unwinding.
+            discardVideo(scrubber)
+            throw e
+        } catch (_: Throwable) {
+            // Video is strictly optional: a failed attach must not turn an import whose
+            // audio already loaded and is playing into an "import failed" error.
+            discardVideo(scrubber)
+        }
+    }
+
+    /** Tear down a [scrubber] that failed to attach, clearing it from the field if it got there. */
+    private fun discardVideo(scrubber: VideoScrubber) {
+        if (videoScrubber === scrubber) {
+            videoScrubber = null
+            _videoFrame.value = null
+        }
+        _hasVideo.value = false
+        scrubber.release()
+    }
+
+    /**
+     * Ask the scrubber for the frame at [norm] (a whole-clip playhead fraction).
+     * A no-op when the loaded source has no video.
+     *
+     * Throttled to [VIDEO_REQUEST_INTERVAL_US] of *media* time: the player emits a
+     * playhead every rendered chunk (~23 ms), and decoding a frame per chunk would
+     * peg a core to redraw a picture that keyframe seeking would usually land on
+     * anyway. Called from both the main thread and the player's worker; the
+     * read-modify-write of [lastVideoRequestUs] isn't atomic, but the two racing is
+     * benign — the worst case is one extra request, which the scrubber coalesces.
+     */
+    private fun requestVideoFrame(norm: Float, force: Boolean = false) {
+        val scrubber = videoScrubber ?: return
+        val durationUs = (_durationSeconds.value.toDouble() * 1_000_000.0).toLong()
+        if (durationUs <= 0L) return
+        val timeUs = (norm.coerceIn(0f, 1f).toDouble() * durationUs).toLong()
+        val last = lastVideoRequestUs
+        // The throttle only exists to thin out the playhead's ~23 ms callbacks. A
+        // discrete jump (a seek, a marker) must always ask, or landing within the
+        // interval of the last position leaves the old picture up with no callback
+        // coming to correct it.
+        if (!force && last >= 0L && abs(timeUs - last) < VIDEO_REQUEST_INTERVAL_US) return
+        lastVideoRequestUs = timeUs
+        scrubber.requestFrame(timeUs)
+    }
+
+    /**
+     * Drop the current file's video and clear the pane. Cheap and non-blocking —
+     * [VideoScrubber.release] doesn't join its worker — so it is safe on the main
+     * thread.
+     */
+    private fun releaseVideo() {
+        val old = videoScrubber
+        videoScrubber = null
+        _hasVideo.value = false
+        _videoFrame.value = null
+        lastVideoRequestUs = -1L
+        old?.release()
     }
 
     /**
@@ -781,9 +940,14 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
         // short-lived plain thread is used instead of a coroutine.
         val recorderRef = recorder
         val playerRef = player
+        val videoRef = videoScrubber
+        videoScrubber = null
         thread(name = "AudioScratch-teardown") {
             recorderRef.stop()
             playerRef.release()
+            // Doesn't block (its worker self-terminates), but it rides along here so
+            // every engine is torn down in one place.
+            videoRef?.release()
         }
     }
 
@@ -837,6 +1001,10 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
         // Minutes of audio would jank the frame this runs on; keep it off the main thread.
         val peaks = withContext(Dispatchers.Default) { WaveformPeaks(samples) }
         loadedSourcePath = sourceFile?.absolutePath
+        // Every load drops the previous file's video: a recording and an
+        // Instant-Replay clip have none, so loading one after a video must remove
+        // the pane. importFromUri re-attaches afterwards when the new file has one.
+        releaseVideo()
         // load() tears the old player down first, joining a render thread that may be
         // parked in a blocking AudioTrack.write() — tens of ms the main thread must
         // not spend. The re-applies ride along so they still land on the fresh track
@@ -888,6 +1056,13 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
          * every write stays a full chunk. See [clampLoop].
          */
         const val MIN_LOOP_FRAMES = 1024
+
+        /**
+         * Smallest playhead move (media µs, ~40 ms — a frame at 25 fps) that asks
+         * for a new video frame. See [requestVideoFrame].
+         */
+        const val VIDEO_REQUEST_INTERVAL_US = 40_000L
+
         const val MIN_SPEED = 0.25f
         const val MAX_SPEED = 4f
         const val MAX_SEMITONES = 36

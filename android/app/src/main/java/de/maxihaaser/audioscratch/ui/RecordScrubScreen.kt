@@ -1,5 +1,6 @@
 package de.maxihaaser.audioscratch.ui
 
+import android.graphics.Bitmap
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -103,6 +104,8 @@ fun RecordScrubScreen(
     val viewWindow by viewModel.viewWindow.collectAsState()
     val loop by viewModel.loop.collectAsState()
     val markers by viewModel.markers.collectAsState()
+    val hasVideo by viewModel.hasVideo.collectAsState()
+    val videoFrame by viewModel.videoFrame.collectAsState()
 
     Column(
         modifier = modifier
@@ -155,8 +158,11 @@ fun RecordScrubScreen(
                         viewWindow = viewWindow,
                         loop = loop,
                         markers = markers,
+                        hasVideo = hasVideo,
+                        videoFrame = videoFrame,
                         onScrub = viewModel::scrub,
                         onScrubAtViewNorm = viewModel::scrubAtViewNorm,
+                        onScrubBySeconds = viewModel::scrubBySeconds,
                         onZoomBy = viewModel::zoomBy,
                         onZoomToFit = viewModel::zoomToFit,
                         onTransformView = viewModel::transformView,
@@ -411,8 +417,11 @@ private fun ReadyContent(
     viewWindow: ViewWindow,
     loop: LoopRegion,
     markers: List<Marker>,
+    hasVideo: Boolean,
+    videoFrame: Bitmap?,
     onScrub: (Float) -> Unit,
     onScrubAtViewNorm: (Float) -> Unit,
+    onScrubBySeconds: (Double) -> Unit,
     onZoomBy: (Float, Float) -> Unit,
     onZoomToFit: () -> Unit,
     onTransformView: (Float, Float, Float) -> Unit,
@@ -453,6 +462,20 @@ private fun ReadyContent(
             .verticalScroll(rememberScrollState()),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
+        // Desktop parity: the picture stacks on top of the timeline. Only an
+        // imported file can have one — a recording / Instant-Replay clip is mic
+        // audio, so the pane is simply absent for them.
+        if (hasVideo) {
+            VideoPane(
+                frame = videoFrame,
+                onScrubBySeconds = onScrubBySeconds,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(220.dp),
+            )
+            Spacer(Modifier.height(8.dp))
+        }
+
         // The ruler spans exactly the waveform's window, so both must be laid out
         // to the same width. Seconds are Double: Float would drift the ticks off
         // the waveform on a clip longer than ~379 s.

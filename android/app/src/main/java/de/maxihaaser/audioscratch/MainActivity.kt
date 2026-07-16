@@ -3,6 +3,7 @@ package de.maxihaaser.audioscratch
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -70,12 +71,18 @@ class MainActivity : ComponentActivity() {
                         ActivityResultContracts.RequestPermission(),
                     ) { /* result ignored: the service arms regardless */ }
 
-                    // OpenDocument gives read access to a single picked file; we
-                    // decode it immediately, so no persisted URI permission needed.
+                    // OpenDocument gives read access to a single picked file. The
+                    // audio is decoded once, up front, but the video pane keeps
+                    // seeking the Uri for the whole session — so persist the grant,
+                    // which otherwise dies with this Activity instance (a rotation
+                    // would leave the picture stuck).
                     val importLauncher = rememberLauncherForActivityResult(
                         ActivityResultContracts.OpenDocument(),
                     ) { uri ->
-                        if (uri != null) viewModel.importFromUri(uri)
+                        if (uri != null) {
+                            takePersistableReadPermission(uri)
+                            viewModel.importFromUri(uri)
+                        }
                     }
 
                     RecordScrubScreen(
@@ -126,6 +133,42 @@ class MainActivity : ComponentActivity() {
         // Backgrounded: a saved clip must not silently replace the loaded session.
         viewModel.setForeground(false)
         super.onStop()
+    }
+
+    /**
+     * Hold on to read access for [uri] beyond this Activity instance, so the video
+     * pane can keep decoding frames from it.
+     *
+     * Best-effort: not every provider offers a persistable grant (it throws
+     * [SecurityException] when it doesn't), and the import works regardless — the
+     * audio is decoded immediately, under the one-shot grant the picker already
+     * gave us. Only the picture would be lost, and only after a recreation.
+     */
+    private fun takePersistableReadPermission(uri: Uri) {
+        // Drop the grants held for earlier imports first: only the current file is
+        // ever read back, and the per-app persisted-grant table is capped (a few
+        // hundred entries), so holding one per import would eventually start
+        // throwing and cost the user the picture.
+        for (held in contentResolver.persistedUriPermissions) {
+            if (held.uri != uri) {
+                try {
+                    contentResolver.releasePersistableUriPermission(
+                        held.uri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                    )
+                } catch (_: SecurityException) {
+                    // Already gone — nothing to release.
+                }
+            }
+        }
+        try {
+            contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION,
+            )
+        } catch (_: SecurityException) {
+            // Non-persistable provider — nothing to do.
+        }
     }
 
     private fun handleClipIntent(intent: Intent?) {
