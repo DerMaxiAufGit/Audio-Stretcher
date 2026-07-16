@@ -3,6 +3,7 @@ package de.maxihaaser.audioscratch.audio
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
+import android.media.PlaybackParams
 import kotlin.concurrent.thread
 import kotlin.math.roundToInt
 
@@ -19,6 +20,13 @@ class ScrubPlayer {
 
     private enum class Mode { IDLE, PLAYING, SCRUBBING }
 
+    /**
+     * How pitch behaves when the transport rate changes. [PITCH_PRESERVE] holds
+     * pitch while tempo shifts; [VARISPEED] lets pitch ride the rate like a
+     * turntable / vinyl.
+     */
+    enum class PlaybackMode { PITCH_PRESERVE, VARISPEED }
+
     private val lock = Object()
 
     private var samples: ShortArray = ShortArray(0)
@@ -29,6 +37,26 @@ class ScrubPlayer {
 
     @Volatile
     private var alive = false
+
+    /** Software output gain applied in the render loop; `1f` = unity. */
+    @Volatile
+    private var gain = 1f
+
+    // Last-requested transport params. Written from the main thread and re-applied
+    // whenever [load] rebuilds the track, so settings survive a new recording/clip.
+    @Volatile
+    private var baseRate = 1f
+
+    @Volatile
+    private var pitchRatio = 1f
+
+    @Volatile
+    private var playbackMode = PlaybackMode.PITCH_PRESERVE
+
+    // What was last pushed to the track, so redundant applies are skipped. NaN
+    // forces the next apply — [load] resets these for the freshly built track.
+    private var lastAppliedSpeed = Float.NaN
+    private var lastAppliedPitch = Float.NaN
 
     // --- state guarded by [lock] ---
     private var mode = Mode.IDLE
@@ -87,6 +115,13 @@ class ScrubPlayer {
             grainFramesRemaining = 0
         }
         track = newTrack
+        // Re-apply the last-requested transport params to the fresh track before
+        // the worker starts rendering, so a reload inherits the current settings.
+        // The cache is invalidated first: this is a different track, so the params
+        // must be pushed even if they match what the previous track had.
+        lastAppliedSpeed = Float.NaN
+        lastAppliedPitch = Float.NaN
+        applyPlaybackParams()
         startWorker(newTrack)
     }
 
@@ -107,6 +142,53 @@ class ScrubPlayer {
                 mode = Mode.IDLE
                 lock.notifyAll()
             }
+        }
+    }
+
+    /** Set the software output gain (`0f`..`2f`; `0f` = muted). Applied live. */
+    fun setGain(g: Float) {
+        gain = g.coerceIn(0f, 2f)
+    }
+
+    /**
+     * Set the transport speed and pitch. In [PlaybackMode.PITCH_PRESERVE] pitch is
+     * held while the base rate changes tempo; in [PlaybackMode.VARISPEED] pitch
+     * rides the base rate like a turntable. The request is stored and re-applied
+     * after [load] rebuilds the track.
+     */
+    fun setPlaybackParams(baseRate: Float, pitchRatio: Float, mode: PlaybackMode) {
+        this.baseRate = baseRate.coerceIn(MIN_RATE, MAX_RATE)
+        this.pitchRatio = pitchRatio
+        this.playbackMode = mode
+        applyPlaybackParams()
+    }
+
+    private fun applyPlaybackParams() {
+        val t = track ?: return
+        val trackSpeed = baseRate
+        // Pitch gets its own bounds: the ±36 semitone / ±100 cent range reaches a
+        // ratio of ~0.117..8.51, far outside the transport's 0.25..4 rate limits.
+        // Clamping pitch to the rate bounds would silently stall the slider at ±24 st.
+        val trackPitch = when (playbackMode) {
+            PlaybackMode.PITCH_PRESERVE -> pitchRatio
+            PlaybackMode.VARISPEED -> baseRate * pitchRatio
+        }.coerceIn(MIN_PITCH, MAX_PITCH)
+        // Skip redundant native reconfigures: a continuous slider drag emits many
+        // ticks that resolve to identical params, and each apply is a JNI call into
+        // the audio framework that can zipper the time-stretcher mid-sweep.
+        if (trackSpeed == lastAppliedSpeed && trackPitch == lastAppliedPitch) return
+        try {
+            // Build a fresh instance so a shared PlaybackParams is never mutated.
+            t.playbackParams = PlaybackParams()
+                .allowDefaults()
+                .setSpeed(trackSpeed)
+                .setPitch(trackPitch)
+            lastAppliedSpeed = trackSpeed
+            lastAppliedPitch = trackPitch
+        } catch (_: IllegalArgumentException) {
+            // Device rejected this speed/pitch — keep the previous params.
+        } catch (_: IllegalStateException) {
+            // Track uninitialised (e.g. mid-release) — keep the previous params.
         }
     }
 
@@ -209,6 +291,13 @@ class ScrubPlayer {
                 }
 
                 if (toWrite > 0) {
+                    val g = gain
+                    if (g != 1f) {
+                        // Apply output gain in place; soft-clip to the 16-bit range.
+                        for (i in 0 until toWrite) {
+                            chunk[i] = (chunk[i] * g).toInt().coerceIn(-32768, 32767).toShort()
+                        }
+                    }
                     // Blocking write in MODE_STREAM paces playback to real time.
                     t.write(chunk, 0, toWrite)
                     onPlayhead?.invoke(emitPos)
@@ -230,5 +319,14 @@ class ScrubPlayer {
         const val CHUNK_FRAMES = 1024
         const val MIN_BUFFER_BYTES = 4096
         const val GRAIN_SECONDS = 0.09f
+        const val MIN_RATE = 0.25f
+        const val MAX_RATE = 4f
+
+        // Pitch bounds cover the full ±36 semitone / ±100 cent range
+        // (2^(±3700/1200) ≈ 0.117 .. 8.51) — deliberately wider than the rate
+        // bounds. A device that rejects an extreme value trips the catch below
+        // and keeps the previous params.
+        const val MIN_PITCH = 0.11f
+        const val MAX_PITCH = 8.6f
     }
 }

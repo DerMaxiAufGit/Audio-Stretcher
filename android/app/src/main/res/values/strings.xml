@@ -22,4 +22,21 @@
     <string name="ir_status_off">Off. Turn on to keep the last few seconds ready to save.</string>
     <string name="clip_load_failed">Couldn\'t open that clip.</string>
     <string name="record_start_failed">Couldn\'t start recording — the microphone may be in use.</string>
+
+    <!-- Playback controls -->
+    <string name="speed_label">Speed</string>
+    <string name="speed_value">%1$.2f×</string>
+    <string name="speed_reset">1×</string>
+    <string name="pitch_label">Pitch</string>
+    <string name="pitch_value">%1$+d st  %2$+d c</string>
+    <string name="pitch_reset">0</string>
+    <string name="pitch_semitones_label">Semitones</string>
+    <string name="pitch_cents_label">Cents</string>
+    <string name="mode_label">Mode</string>
+    <string name="mode_pitch_preserve">Pitch-preserve</string>
+    <string name="mode_turntable">Turntable</string>
+    <string name="volume_label">Volume</string>
+    <string name="volume_value">%1$d%%</string>
+    <string name="mute_label">Mute</string>
+    <string name="time_position">%1$s / %2$s</string>
 </resources>

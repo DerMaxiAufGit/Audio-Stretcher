@@ -20,8 +20,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -54,6 +56,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import de.maxihaaser.audioscratch.R
+import de.maxihaaser.audioscratch.audio.ScrubPlayer
+import kotlin.math.ln
+import kotlin.math.pow
+import kotlin.math.roundToInt
 
 /**
  * The single screen of the MVP: record from the mic, then scrub / play back the
@@ -78,6 +84,13 @@ fun RecordScrubScreen(
     val errorMessage by viewModel.errorMessage.collectAsState()
     val isInstantReplayOn by viewModel.isInstantReplayOn.collectAsState()
     val bufferSeconds by viewModel.bufferSeconds.collectAsState()
+    val speed by viewModel.speed.collectAsState()
+    val pitchSemitones by viewModel.pitchSemitones.collectAsState()
+    val pitchCents by viewModel.pitchCents.collectAsState()
+    val playbackMode by viewModel.playbackMode.collectAsState()
+    val volumePercent by viewModel.volumePercent.collectAsState()
+    val muted by viewModel.muted.collectAsState()
+    val durationSeconds by viewModel.durationSeconds.collectAsState()
 
     Column(
         modifier = modifier
@@ -119,8 +132,23 @@ fun RecordScrubScreen(
                         state = state,
                         playhead = playhead,
                         isPlaying = isPlaying,
+                        speed = speed,
+                        pitchSemitones = pitchSemitones,
+                        pitchCents = pitchCents,
+                        playbackMode = playbackMode,
+                        volumePercent = volumePercent,
+                        muted = muted,
+                        durationSeconds = durationSeconds,
                         onScrub = viewModel::scrub,
                         onTogglePlay = viewModel::togglePlayback,
+                        onSetSpeed = viewModel::setSpeed,
+                        onResetSpeed = viewModel::resetSpeed,
+                        onSetPitchSemitones = viewModel::setPitchSemitones,
+                        onSetPitchCents = viewModel::setPitchCents,
+                        onResetPitch = viewModel::resetPitch,
+                        onSetPlaybackMode = viewModel::setPlaybackMode,
+                        onSetVolumePercent = viewModel::setVolumePercent,
+                        onSetMuted = viewModel::setMuted,
                     )
 
                     UiState.Recording -> RecordingIndicator()
@@ -338,11 +366,30 @@ private fun ReadyContent(
     state: UiState.Ready,
     playhead: Float,
     isPlaying: Boolean,
+    speed: Float,
+    pitchSemitones: Int,
+    pitchCents: Int,
+    playbackMode: ScrubPlayer.PlaybackMode,
+    volumePercent: Int,
+    muted: Boolean,
+    durationSeconds: Float,
     onScrub: (Float) -> Unit,
     onTogglePlay: () -> Unit,
+    onSetSpeed: (Float) -> Unit,
+    onResetSpeed: () -> Unit,
+    onSetPitchSemitones: (Int) -> Unit,
+    onSetPitchCents: (Int) -> Unit,
+    onResetPitch: () -> Unit,
+    onSetPlaybackMode: (ScrubPlayer.PlaybackMode) -> Unit,
+    onSetVolumePercent: (Int) -> Unit,
+    onSetMuted: (Boolean) -> Unit,
 ) {
+    // The transport + DSP controls make this taller than the viewport on small
+    // screens, so the whole Ready pane scrolls.
     Column(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .verticalScroll(rememberScrollState()),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Waveform(
@@ -364,23 +411,207 @@ private fun ReadyContent(
             onValueChange = onScrub,
         )
 
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Text(
-                text = formatMillis((playhead * state.durationMs).toLong()),
-                style = MaterialTheme.typography.labelMedium,
-            )
-            Text(
-                text = formatMillis(state.durationMs),
-                style = MaterialTheme.typography.labelMedium,
-            )
-        }
+        Text(
+            text = stringResource(
+                R.string.time_position,
+                formatCentis((playhead.coerceIn(0f, 1f) * durationSeconds * 1000f).toLong()),
+                formatCentis((durationSeconds * 1000f).toLong()),
+            ),
+            style = MaterialTheme.typography.labelMedium,
+        )
 
         Spacer(Modifier.height(20.dp))
 
         PlayPauseButton(isPlaying = isPlaying, onClick = onTogglePlay)
+
+        Spacer(Modifier.height(20.dp))
+
+        PitchSpeedControls(
+            speed = speed,
+            pitchSemitones = pitchSemitones,
+            pitchCents = pitchCents,
+            playbackMode = playbackMode,
+            onSetSpeed = onSetSpeed,
+            onResetSpeed = onResetSpeed,
+            onSetPitchSemitones = onSetPitchSemitones,
+            onSetPitchCents = onSetPitchCents,
+            onResetPitch = onResetPitch,
+            onSetPlaybackMode = onSetPlaybackMode,
+        )
+
+        Spacer(Modifier.height(12.dp))
+
+        VolumeControls(
+            volumePercent = volumePercent,
+            muted = muted,
+            onSetVolumePercent = onSetVolumePercent,
+            onSetMuted = onSetMuted,
+        )
+    }
+}
+
+/**
+ * Speed / pitch / mode section. Speed is log-mapped over 0.25×..4× (so 1× sits at
+ * the slider's midpoint); pitch is a coarse semitone slider plus a cents vernier.
+ * The mode toggle picks between holding pitch while the tempo moves and letting
+ * pitch ride the rate like a turntable.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun PitchSpeedControls(
+    speed: Float,
+    pitchSemitones: Int,
+    pitchCents: Int,
+    playbackMode: ScrubPlayer.PlaybackMode,
+    onSetSpeed: (Float) -> Unit,
+    onResetSpeed: () -> Unit,
+    onSetPitchSemitones: (Int) -> Unit,
+    onSetPitchCents: (Int) -> Unit,
+    onResetPitch: () -> Unit,
+    onSetPlaybackMode: (ScrubPlayer.PlaybackMode) -> Unit,
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = stringResource(R.string.speed_label),
+                    style = MaterialTheme.typography.titleSmall,
+                )
+                Spacer(Modifier.weight(1f))
+                Text(
+                    text = stringResource(R.string.speed_value, speed),
+                    style = MaterialTheme.typography.labelMedium,
+                )
+                TextButton(onClick = onResetSpeed) {
+                    Text(stringResource(R.string.speed_reset))
+                }
+            }
+            Slider(
+                value = speedToSlider(speed),
+                onValueChange = { onSetSpeed(sliderToSpeed(it)) },
+            )
+
+            Spacer(Modifier.height(8.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = stringResource(R.string.pitch_label),
+                    style = MaterialTheme.typography.titleSmall,
+                )
+                Spacer(Modifier.weight(1f))
+                Text(
+                    text = stringResource(R.string.pitch_value, pitchSemitones, pitchCents),
+                    style = MaterialTheme.typography.labelMedium,
+                )
+                TextButton(onClick = onResetPitch) {
+                    Text(stringResource(R.string.pitch_reset))
+                }
+            }
+            Text(
+                text = stringResource(R.string.pitch_semitones_label),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Slider(
+                value = pitchSemitones.toFloat(),
+                onValueChange = { onSetPitchSemitones(it.roundToInt()) },
+                valueRange = -36f..36f,
+                // 73 integer stops (-36..+36) → 71 steps between the endpoints.
+                steps = 71,
+            )
+            Text(
+                text = stringResource(R.string.pitch_cents_label),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Slider(
+                value = pitchCents.toFloat(),
+                onValueChange = { onSetPitchCents(it.roundToInt()) },
+                valueRange = -100f..100f,
+            )
+
+            Spacer(Modifier.height(8.dp))
+
+            Text(
+                text = stringResource(R.string.mode_label),
+                style = MaterialTheme.typography.titleSmall,
+            )
+
+            Spacer(Modifier.height(4.dp))
+
+            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                PlaybackModeOptions.forEachIndexed { index, (mode, labelRes) ->
+                    SegmentedButton(
+                        selected = playbackMode == mode,
+                        onClick = { onSetPlaybackMode(mode) },
+                        shape = SegmentedButtonDefaults.itemShape(
+                            index = index,
+                            count = PlaybackModeOptions.size,
+                        ),
+                    ) {
+                        Text(stringResource(labelRes))
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Master volume (0–200 %) plus a mute toggle, which forces the gain to zero. */
+@Composable
+private fun VolumeControls(
+    volumePercent: Int,
+    muted: Boolean,
+    onSetVolumePercent: (Int) -> Unit,
+    onSetMuted: (Boolean) -> Unit,
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = stringResource(R.string.volume_label),
+                    style = MaterialTheme.typography.titleSmall,
+                )
+                Spacer(Modifier.weight(1f))
+                Text(
+                    text = stringResource(R.string.volume_value, volumePercent),
+                    style = MaterialTheme.typography.labelMedium,
+                )
+            }
+            Slider(
+                value = volumePercent.toFloat(),
+                onValueChange = { onSetVolumePercent(it.roundToInt()) },
+                valueRange = 0f..200f,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = stringResource(R.string.mute_label),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Spacer(Modifier.weight(1f))
+                Switch(checked = muted, onCheckedChange = onSetMuted)
+            }
+        }
     }
 }
 
@@ -508,9 +739,24 @@ private fun RecordButton(isRecording: Boolean, enabled: Boolean, onClick: () -> 
 
 private val RecordRed = Color(0xFFE53935)
 
-private fun formatMillis(ms: Long): String {
-    val totalSeconds = (ms / 1000).coerceAtLeast(0)
-    val minutes = totalSeconds / 60
-    val seconds = totalSeconds % 60
-    return "%d:%02d".format(minutes, seconds)
+private val PlaybackModeOptions = listOf(
+    ScrubPlayer.PlaybackMode.PITCH_PRESERVE to R.string.mode_pitch_preserve,
+    ScrubPlayer.PlaybackMode.VARISPEED to R.string.mode_turntable,
+)
+
+/** Slider position `[0,1]` → speed: `0.25 * 16^t`, so t=0.5 lands exactly on 1×. */
+private fun sliderToSpeed(t: Float): Float =
+    (0.25f * 16f.pow(t.coerceIn(0f, 1f))).coerceIn(0.25f, 4f)
+
+/** Inverse of [sliderToSpeed]: speed → slider position `[0,1]`. */
+private fun speedToSlider(rate: Float): Float =
+    (ln(rate / 0.25f) / ln(16f)).coerceIn(0f, 1f)
+
+/** Format a millisecond position as `M:SS.CC` (centiseconds). */
+private fun formatCentis(ms: Long): String {
+    val totalCentis = ms.coerceAtLeast(0) / 10
+    val minutes = totalCentis / 6000
+    val seconds = (totalCentis / 100) % 60
+    val centis = totalCentis % 100
+    return "%d:%02d.%02d".format(minutes, seconds, centis)
 }

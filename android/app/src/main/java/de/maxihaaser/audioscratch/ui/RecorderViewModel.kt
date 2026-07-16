@@ -23,6 +23,7 @@ import java.io.File
 import java.io.IOException
 import kotlin.concurrent.thread
 import kotlin.coroutines.cancellation.CancellationException
+import kotlin.math.pow
 
 /** High-level state driving [RecordScrubScreen]. */
 sealed interface UiState {
@@ -36,7 +37,6 @@ sealed interface UiState {
     class Ready(
         val file: File?,
         val peaks: FloatArray,
-        val durationMs: Long,
         val sampleRate: Int,
     ) : UiState
 }
@@ -76,6 +76,34 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
     /** Rolling-buffer length (seconds) used when Instant Replay is armed. */
     private val _bufferSeconds = MutableStateFlow(InstantReplayService.DEFAULT_SECONDS)
     val bufferSeconds: StateFlow<Int> = _bufferSeconds.asStateFlow()
+
+    /** Playback speed / base rate, 0.25×..4×; 1× is normal tempo. */
+    private val _speed = MutableStateFlow(1f)
+    val speed: StateFlow<Float> = _speed.asStateFlow()
+
+    /** Coarse pitch offset in semitones, -36..+36. */
+    private val _pitchSemitones = MutableStateFlow(0)
+    val pitchSemitones: StateFlow<Int> = _pitchSemitones.asStateFlow()
+
+    /** Fine pitch offset in cents, -100..+100. */
+    private val _pitchCents = MutableStateFlow(0)
+    val pitchCents: StateFlow<Int> = _pitchCents.asStateFlow()
+
+    /** Pitch-preserve (default) vs turntable / varispeed. */
+    private val _playbackMode = MutableStateFlow(ScrubPlayer.PlaybackMode.PITCH_PRESERVE)
+    val playbackMode: StateFlow<ScrubPlayer.PlaybackMode> = _playbackMode.asStateFlow()
+
+    /** Master volume as a percentage, 0..200; 100 is unity gain. */
+    private val _volumePercent = MutableStateFlow(100)
+    val volumePercent: StateFlow<Int> = _volumePercent.asStateFlow()
+
+    /** Whether output is muted (gain forced to 0). */
+    private val _muted = MutableStateFlow(false)
+    val muted: StateFlow<Boolean> = _muted.asStateFlow()
+
+    /** Duration of the loaded audio in seconds (0 when nothing is loaded). */
+    private val _durationSeconds = MutableStateFlow(0f)
+    val durationSeconds: StateFlow<Float> = _durationSeconds.asStateFlow()
 
     /** Whether the hosting Activity is in the foreground (set by MainActivity). */
     private var isForeground = false
@@ -231,6 +259,68 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
         _playhead.value = norm.coerceIn(0f, 1f)
     }
 
+    /** Set the playback speed (base rate), clamped to 0.25×..4×. */
+    fun setSpeed(rate: Float) {
+        _speed.value = rate.coerceIn(MIN_SPEED, MAX_SPEED)
+        applyPlaybackParams()
+    }
+
+    /** Reset the playback speed to 1×. */
+    fun resetSpeed() {
+        setSpeed(1f)
+    }
+
+    /** Set the coarse pitch offset in semitones, clamped to -36..+36. */
+    fun setPitchSemitones(semitones: Int) {
+        _pitchSemitones.value = semitones.coerceIn(-MAX_SEMITONES, MAX_SEMITONES)
+        applyPlaybackParams()
+    }
+
+    /** Set the fine pitch offset in cents, clamped to -100..+100. */
+    fun setPitchCents(cents: Int) {
+        _pitchCents.value = cents.coerceIn(-MAX_CENTS, MAX_CENTS)
+        applyPlaybackParams()
+    }
+
+    /** Reset pitch to 0 semitones / 0 cents. */
+    fun resetPitch() {
+        _pitchSemitones.value = 0
+        _pitchCents.value = 0
+        applyPlaybackParams()
+    }
+
+    /** Choose pitch-preserve or turntable (varispeed) mode. */
+    fun setPlaybackMode(mode: ScrubPlayer.PlaybackMode) {
+        _playbackMode.value = mode
+        applyPlaybackParams()
+    }
+
+    /** Set the master volume as a percentage, clamped to 0..200. */
+    fun setVolumePercent(pct: Int) {
+        _volumePercent.value = pct.coerceIn(0, MAX_VOLUME_PERCENT)
+        applyGain()
+    }
+
+    /** Mute or unmute the output (mute forces gain to 0). */
+    fun setMuted(muted: Boolean) {
+        _muted.value = muted
+        applyGain()
+    }
+
+    /** Push the current speed / pitch / mode into the player. */
+    private fun applyPlaybackParams() {
+        player.setPlaybackParams(_speed.value, pitchRatio(), _playbackMode.value)
+    }
+
+    /** Push the current volume / mute state into the player as a gain. */
+    private fun applyGain() {
+        player.setGain(if (_muted.value) 0f else _volumePercent.value / 100f)
+    }
+
+    /** pitchRatio = 2^((semitones*100 + cents) / 1200). */
+    private fun pitchRatio(): Float =
+        2.0.pow((_pitchSemitones.value * 100 + _pitchCents.value) / 1200.0).toFloat()
+
     /** Dismiss the current [errorMessage], if any. */
     fun clearError() {
         _errorMessage.value = null
@@ -349,22 +439,32 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
 
     /**
      * Load canonical mono [SAMPLE_RATE]Hz 16-bit PCM [samples] into the player,
-     * reset the playhead, compute the waveform peaks, and move to
-     * [UiState.Ready]. Shared by [stopRecording] and [importFromUri];
+     * reset the playhead, compute the waveform peaks, move to [UiState.Ready] and
+     * start playing. Shared by [stopRecording], [importFromUri] and [loadClipFile];
      * [sourceFile] is the on-disk WAV backing a recording, or `null` for an
      * in-memory import.
+     *
+     * Only ever called for a *completed* load, so the auto-play here can never fire
+     * while a recording is in progress.
      */
     private fun loadSamplesIntoPlayer(samples: ShortArray, sourceFile: File?) {
         loadedSourcePath = sourceFile?.absolutePath
         player.load(samples, SAMPLE_RATE)
+        // load() rebuilt the AudioTrack; re-apply the current transport + gain so
+        // the freshly loaded clip inherits the user's settings.
+        applyPlaybackParams()
+        applyGain()
         _playhead.value = 0f
-        _isPlaying.value = false
+        _durationSeconds.value = samples.size.toFloat() / SAMPLE_RATE
         _uiState.value = UiState.Ready(
             file = sourceFile,
             peaks = WavIo.computePeaks(samples, WAVEFORM_BUCKETS),
-            durationMs = samples.size * 1000L / SAMPLE_RATE,
             sampleRate = SAMPLE_RATE,
         )
+        // Desktop parity: auto-play as soon as a recording / import / clip loads.
+        // This runs only on a completed load, never mid-recording.
+        player.play()
+        _isPlaying.value = true
     }
 
     private fun recordingFile(): File = File(getApplication<Application>().filesDir, RECORDING_NAME)
@@ -376,5 +476,10 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
         const val SAMPLE_RATE = 44_100
         const val RECORDING_NAME = "recording.wav"
         const val WAVEFORM_BUCKETS = 512
+        const val MIN_SPEED = 0.25f
+        const val MAX_SPEED = 4f
+        const val MAX_SEMITONES = 36
+        const val MAX_CENTS = 100
+        const val MAX_VOLUME_PERCENT = 200
     }
 }

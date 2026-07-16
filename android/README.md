@@ -35,6 +35,18 @@ all flow through the same scrub/playback path.
    **"Clip now"** button. Tapping it saves that window as a WAV and loads it into
    the scrubber (in-app when foregrounded, or via a "Clip saved" notification).
    It never captures device / system audio.
+5. **Transport / DSP controls** matching the desktop app:
+   - **Speed** 0.25×–4× (log-mapped slider, reset to 1×).
+   - **Pitch** ±36 semitones + ±100 cents fine (reset to 0), independent of speed.
+   - **Playback mode**: *Pitch-preserve* (default) ⇄ *Turntable* (varispeed — pitch
+     rides the rate, like vinyl).
+   - **Volume** 0–200% with mute, and an `M:SS.CC / M:SS.CC` time readout.
+   - Auto-play as soon as a recording / import / clip loads.
+
+   The time-stretch is Android's built-in **Sonic** engine, driven via
+   `AudioTrack.setPlaybackParams` — pitch-preserve maps to `speed=rate,
+   pitch=pitchRatio`; turntable maps to `speed=rate, pitch=rate × pitchRatio`.
+   No hand-written DSP.
 
 Runtime permissions: RECORD_AUDIO is requested with a rationale card and a denied
 state; POST_NOTIFICATIONS (API 33+) is requested when arming Instant Replay. The
@@ -139,18 +151,21 @@ Until the JAR exists, `./gradlew` will fail with
 > APK. `local.properties` is git-ignored; the wrapper JAR is intentionally not
 > committed (regenerate it as above).
 
-## Roadmap — remaining scope of issue #5
+## Roadmap — towards full desktop parity
 
-Implemented: in-app recording, waveform scrubbing, **audio/video import**, and
-**mic-only Instant Replay**. Still remaining:
+Implemented: in-app recording, waveform scrubbing, **audio/video import**,
+**mic-only Instant Replay**, and the **transport / DSP controls** (speed, pitch,
+pitch-preserve ⇄ turntable, volume/mute). Still remaining for desktop parity:
 
-- **Time-stretch DSP:** independent tempo/pitch control (phase-vocoder or
-  WSOLA), mirroring the desktop stretcher's Bungee-based behaviour. The current
-  scrub is grain-based (turntable feel), not pitch-preserving time-stretch.
+- **Waveform zoom & scroll** + an adaptive **time ruler** (desktop has +/−/fit,
+  wheel zoom, and a tick ruler).
+- **A/B loop:** set A / set B / clear / enable, draggable handles, shaded region,
+  and click-free wrap at the loop point.
+- **Markers:** drop at playhead, jump prev/next, rename, delete, flags on a bar.
 - **Video display while scrubbing:** import already decodes a video's audio
   track; showing synced video frames under the playhead is not built.
+- **Settings surface** with persistence (buffer length etc.).
 - **Polish:** a proper adaptive launcher icon (ships without a custom icon),
-  variable-speed / reverse scrubbing with real resampling, waveform zoom,
   multiple saved takes, exporting clips to shared storage (MediaStore) rather
   than app-private `filesDir`, and stereo capture.
 
