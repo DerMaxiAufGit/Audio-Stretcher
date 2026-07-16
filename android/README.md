@@ -146,7 +146,8 @@ Studio** (Ladybug or newer), let it sync, then Run on a device or emulator with
 a microphone. Grant the microphone permission when prompted, record, then drag
 the waveform to scrub.
 
-Command line (once the wrapper JAR exists — see below):
+Command line — the Gradle wrapper is checked in, so a fresh clone needs nothing
+but a JDK and the SDK:
 
 ```sh
 cd android
@@ -154,24 +155,18 @@ cd android
 ./gradlew :app:installDebug         # install on a connected device
 ```
 
-### ⚠️ Missing `gradle/wrapper/gradle-wrapper.jar`
+### Toolchain requirements
 
-The Gradle **wrapper JAR** is a binary and is intentionally **not** checked in
-here (it cannot be hand-written). The `gradlew` / `gradlew.bat` scripts and
-`gradle-wrapper.properties` are present, but you must generate the JAR once:
+- **JDK 17–21.** AGP 8.7.3 does not accept a newer JDK — on a machine whose
+  default `java` is 22+, point `JAVA_HOME` at a 17/21 install for the build.
+- **Android SDK** with `platforms;android-35` and `build-tools;35.0.0`.
+  `local.properties` (the `sdk.dir` pointer) is git-ignored and machine-specific;
+  Android Studio writes it on first sync, or create it by hand:
+  `echo "sdk.dir=/path/to/Android/Sdk" > local.properties`.
 
-- **Easiest:** open `android/` in Android Studio — it regenerates the wrapper
-  (including the JAR) on the first Gradle sync, or
-- **CLI:** with a system Gradle 8.x installed, run `gradle wrapper
-  --gradle-version 8.11.1` inside `android/`.
-
-Until the JAR exists, `./gradlew` will fail with
-`Could not find or load main class org.gradle.wrapper.GradleWrapperMain`.
-
-> Once the wrapper JAR and a `local.properties` (SDK path) exist, the app builds
-> with a standard `./gradlew :app:assembleDebug` (JDK 17–21) and produces a debug
-> APK. `local.properties` is git-ignored; the wrapper JAR is intentionally not
-> committed (regenerate it as above).
+`gradle/wrapper/gradle-wrapper.jar` **is** committed (the standard Gradle
+recommendation), so `./gradlew` works out of the box and pins Gradle 8.11.1 —
+no `gradle wrapper` regeneration step.
 
 ## Desktop parity
 
